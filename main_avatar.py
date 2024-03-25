@@ -156,6 +156,10 @@ class AvatarTrainer:
             'rotation': rotation_loss.item()
         })
 
+        batch_losses.update({
+            'total': total_loss.item()
+        })
+
         total_loss.backward()
 
         self.optm.step()
@@ -261,7 +265,7 @@ class AvatarTrainer:
         #       f'Backward costs: {backward_start.elapsed_time(backward_end) / 1000.}, ',
         #       f'Step costs: {step_start.elapsed_time(step_end) / 1000.}')
 
-        return total_loss, batch_losses
+        return total_loss, batch_losses, render_output
 
     def pretrain(self):
         dataset_module = self.opt['train'].get('dataset', 'MvRgbDatasetAvatarReX')
@@ -315,7 +319,7 @@ class AvatarTrainer:
                     with open(os.path.join(log_dir, 'loss.txt'), 'a') as fp:
                         fp.write(log_info + '\n')
 
-                if self.iter_idx % 200 == 0 and self.iter_idx != 0:
+                if self.iter_idx % 1000 == 0 and self.iter_idx != 0:
                     self.mini_test(pretraining = True)
 
                 if self.iter_idx == 5000:
@@ -384,7 +388,7 @@ class AvatarTrainer:
                 items = to_cuda(items)
 
                 # one_step_start.record()
-                total_loss, batch_losses = self.forward_one_pass(items)
+                total_loss, batch_losses, render_output = self.forward_one_pass(items)
                 # one_step_end.record()
                 # torch.cuda.synchronize()
                 # print('One step costs %f secs' % (one_step_start.elapsed_time(one_step_end) / 1000.))
@@ -405,6 +409,10 @@ class AvatarTrainer:
                         log_info = log_info + ('%s: %f, ' % (key, smooth_losses[key]))
                         smooth_losses[key] = 0.
                     smooth_count = 0
+                    log_info = log_info + ('xyzmax: %f, xyzmin: %f ' % (render_output['cano_pts'].max(), render_output['cano_pts'].min()))
+                    log_info = log_info + ('occmax: %f, occmin: %f ' % (render_output['opacity'].max(), render_output['opacity'].min()))
+                    log_info = log_info + ('scamax: %f, scamin: %f ' % (render_output['scales'].max(), render_output['scales'].min()))
+                    log_info = log_info + ('rotmax: %f, rotmin: %f ' % (render_output['rotations'].max(), render_output['rotations'].min()))
                     print(log_info)
                     with open(os.path.join(log_dir, 'loss.txt'), 'a') as fp:
                         fp.write(log_info + '\n')

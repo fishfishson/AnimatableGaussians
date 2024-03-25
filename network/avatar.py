@@ -24,11 +24,11 @@ class AvatarNet(nn.Module):
         # init canonical gausssian model
         self.max_sh_degree = 0
         self.cano_gaussian_model = GaussianModel(sh_degree = self.max_sh_degree)
-        cano_smpl_map = cv.imread(config.opt['train']['data']['data_dir'] + '/smpl_pos_map/cano_smpl_pos_map.exr', cv.IMREAD_UNCHANGED)
+        cano_smpl_map = cv.imread(config.opt['train']['data']['data_dir'] + '/cano_smpl_pos_map.exr', cv.IMREAD_UNCHANGED)
         self.cano_smpl_map = torch.from_numpy(cano_smpl_map).to(torch.float32).to(config.device)
         self.cano_smpl_mask = torch.linalg.norm(self.cano_smpl_map, dim = -1) > 0.
         self.init_points = self.cano_smpl_map[self.cano_smpl_mask]
-        self.lbs = torch.from_numpy(np.load(config.opt['train']['data']['data_dir'] + '/smpl_pos_map/init_pts_lbs.npy')).to(torch.float32).to(config.device)
+        self.lbs = torch.from_numpy(np.load(config.opt['train']['data']['data_dir'] + '/init_pts_lbs.npy')).to(torch.float32).to(config.device)
         self.cano_gaussian_model.create_from_pcd(self.init_points, torch.rand_like(self.init_points), spatial_lr_scale = 2.5)
 
         self.color_net = DualStyleUNet(inp_size = 512, inp_ch = 3, out_ch = 3, out_size = 1024, style_dim = 512, n_mlp = 2)
@@ -40,7 +40,7 @@ class AvatarNet(nn.Module):
         self.other_style = torch.ones([1, self.other_net.style_dim], dtype=torch.float32, device=config.device) / np.sqrt(self.other_net.style_dim)
 
         if self.with_viewdirs:
-            cano_nml_map = cv.imread(config.opt['train']['data']['data_dir'] + '/smpl_pos_map/cano_smpl_nml_map.exr', cv.IMREAD_UNCHANGED)
+            cano_nml_map = cv.imread(config.opt['train']['data']['data_dir'] + '/cano_smpl_nml_map.exr', cv.IMREAD_UNCHANGED)
             self.cano_nml_map = torch.from_numpy(cano_nml_map).to(torch.float32).to(config.device)
             self.cano_nmls = self.cano_nml_map[self.cano_smpl_mask]
             self.viewdir_net = nn.Sequential(
@@ -82,10 +82,19 @@ class AvatarNet(nn.Module):
         # exit(1)
 
     def transform_cano2live(self, gaussian_vals, items):
-        pt_mats = torch.einsum('nj,jxy->nxy', self.lbs, items['cano2live_jnt_mats'])
-        gaussian_vals['positions'] = torch.einsum('nxy,ny->nx', pt_mats[..., :3, :3], gaussian_vals['positions']) + pt_mats[..., :3, 3]
-        rot_mats = pytorch3d.transforms.quaternion_to_matrix(gaussian_vals['rotations'])
-        rot_mats = torch.einsum('nxy,nyz->nxz', pt_mats[..., :3, :3], rot_mats)
+        if 'cano2live_jnt_mats' in items:
+            pt_mats = torch.einsum('nj,jxy->nxy', self.lbs, items['cano2live_jnt_mats'])
+            positions = torch.einsum('nxy,ny->nx', pt_mats[..., :3, :3], gaussian_vals['positions']) + pt_mats[..., :3, 3]
+            rot_mats = pytorch3d.transforms.quaternion_to_matrix(gaussian_vals['rotations'])
+            rot_mats = torch.einsum('nxy,nyz->nxz', pt_mats[..., :3, :3], rot_mats)
+        elif 'cano2live_jnt_mats_woRoot' in items:
+            pt_mats = torch.einsum('nj,jxy->nxy', self.lbs, items['cano2live_jnt_mats_woRoot'])
+            positions = torch.einsum('nxy,ny->nx', pt_mats[..., :3, :3], gaussian_vals['positions']) + pt_mats[..., :3, 3]
+            positions = (items['global_orient'] @ positions.mT + items['transl'][:, None]).mT
+            rot_mats = pytorch3d.transforms.quaternion_to_matrix(gaussian_vals['rotations'])
+            rot_mats = torch.einsum('nxy,nyz->nxz', pt_mats[..., :3, :3], rot_mats)
+            rot_mats = items['global_orient'] @ rot_mats
+        gaussian_vals['positions'] = positions
         gaussian_vals['rotations'] = pytorch3d.transforms.matrix_to_quaternion(rot_mats)
 
         return gaussian_vals
@@ -125,9 +134,16 @@ class AvatarNet(nn.Module):
 
     def get_viewdir_feat(self, items):
         with torch.no_grad():
-            pt_mats = torch.einsum('nj,jxy->nxy', self.lbs, items['cano2live_jnt_mats'])
-            live_pts = torch.einsum('nxy,ny->nx', pt_mats[..., :3, :3], self.init_points) + pt_mats[..., :3, 3]
-            live_nmls = torch.einsum('nxy,ny->nx', pt_mats[..., :3, :3], self.cano_nmls)
+            if 'cano2live_jnt_mats' in items:
+                pt_mats = torch.einsum('nj,jxy->nxy', self.lbs, items['cano2live_jnt_mats'])
+                live_pts = torch.einsum('nxy,ny->nx', pt_mats[..., :3, :3], self.init_points) + pt_mats[..., :3, 3]
+                live_nmls = torch.einsum('nxy,ny->nx', pt_mats[..., :3, :3], self.cano_nmls)
+            elif 'cano2live_jnt_mats_woRoot' in items:
+                pt_mats = torch.einsum('nj,jxy->nxy', self.lbs, items['cano2live_jnt_mats_woRoot'])
+                live_pts = torch.einsum('nxy,ny->nx', pt_mats[..., :3, :3], self.init_points) + pt_mats[..., :3, 3]
+                live_pts = (items['global_orient'] @ live_pts.mT + items['transl'][:, None]).mT
+                live_nmls = torch.einsum('nxy,ny->nx', pt_mats[..., :3, :3], self.cano_nmls)
+                live_nmls = (items['global_orient'] @ live_nmls.mT).mT
             cam_pos = -torch.matmul(torch.linalg.inv(items['extr'][:3, :3]), items['extr'][:3, 3])
             viewdirs = F.normalize(cam_pos[None] - live_pts, dim = -1, eps = 1e-3)
             if self.training:
@@ -180,24 +196,24 @@ class AvatarNet(nn.Module):
             front_viewdirs, back_viewdirs = None, None
         colors, color_map = self.get_colors(pose_map, front_viewdirs, back_viewdirs)
 
-        if not self.training and config.opt['test'].get('fix_hand', False) and config.opt['mode'] == 'test':
-            # print('# fuse hands ...')
-            import utils.geo_util as geo_util
-            cano_xyz = self.init_points
-            wl = torch.sigmoid(2.5 * (geo_util.normalize_vert_bbox(items['left_cano_mano_v'], attris = cano_xyz, dim = 0, per_axis = True)[..., 0:1] + 2.0))
-            wr = torch.sigmoid(-2.5 * (geo_util.normalize_vert_bbox(items['right_cano_mano_v'], attris = cano_xyz, dim = 0, per_axis = True)[..., 0:1] - 2.0))
-            wl[cano_xyz[..., 1] < items['cano_smpl_center'][1]] = 0.
-            wr[cano_xyz[..., 1] < items['cano_smpl_center'][1]] = 0.
+        # if not self.training and config.opt['test'].get('fix_hand', False) and config.opt['mode'] == 'test':
+        #     # print('# fuse hands ...')
+        #     import utils.geo_util as geo_util
+        #     cano_xyz = self.init_points
+        #     wl = torch.sigmoid(2.5 * (geo_util.normalize_vert_bbox(items['left_cano_mano_v'], attris = cano_xyz, dim = 0, per_axis = True)[..., 0:1] + 2.0))
+        #     wr = torch.sigmoid(-2.5 * (geo_util.normalize_vert_bbox(items['right_cano_mano_v'], attris = cano_xyz, dim = 0, per_axis = True)[..., 0:1] - 2.0))
+        #     wl[cano_xyz[..., 1] < items['cano_smpl_center'][1]] = 0.
+        #     wr[cano_xyz[..., 1] < items['cano_smpl_center'][1]] = 0.
 
-            s = torch.maximum(wl + wr, torch.ones_like(wl))
-            wl, wr = wl / s, wr / s
+        #     s = torch.maximum(wl + wr, torch.ones_like(wl))
+        #     wl, wr = wl / s, wr / s
 
-            w = wl + wr
-            cano_pts = w * self.hand_positions + (1.0 - w) * cano_pts
-            opacity = w * self.hand_opacity + (1.0 - w) * opacity
-            scales = w * self.hand_scales + (1.0 - w) * scales
-            rotations = w * self.hand_rotations + (1.0 - w) * rotations
-            # colors = w * self.hand_colors + (1.0 - w) * colors
+        #     w = wl + wr
+        #     cano_pts = w * self.hand_positions + (1.0 - w) * cano_pts
+        #     opacity = w * self.hand_opacity + (1.0 - w) * opacity
+        #     scales = w * self.hand_scales + (1.0 - w) * scales
+        #     rotations = w * self.hand_rotations + (1.0 - w) * rotations
+        #     # colors = w * self.hand_colors + (1.0 - w) * colors
 
         gaussian_vals = {
             'positions': cano_pts,
@@ -227,7 +243,11 @@ class AvatarNet(nn.Module):
             'rgb_map': rgb_map,
             'mask_map': mask_map,
             'offset': nonrigid_offset,
-            'pos_map': pos_map
+            'pos_map': pos_map,
+            'cano_pts': cano_pts,
+            'opacity': opacity,
+            'scales': scales,
+            'rotations': rotations,
         }
 
         if not self.training:

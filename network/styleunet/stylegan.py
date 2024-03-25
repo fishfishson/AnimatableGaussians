@@ -9,7 +9,7 @@ from torch.nn import functional as F
 from torch.autograd import Function
 
 from .fused_act import FusedLeakyReLU, fused_leaky_relu
-from .upfirdn2d import upfirdn2d
+from .upfirdn2dlib import upfirdn2d
 from . import conv2d_gradfix
 
 from .styleunet import (

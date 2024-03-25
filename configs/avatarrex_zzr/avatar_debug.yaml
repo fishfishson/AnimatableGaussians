@@ -25,7 +25,7 @@ train:
     - 15
     load_smpl_pos_map: true
   pretrained_dir: null
-  net_ckpt_dir: ./results/avatarrex_zzr/avatar
+  net_ckpt_dir: ./results/avatarrex_zzr/avatar_debug
   prev_ckpt: null
   ckpt_interval:
     epoch: 10
