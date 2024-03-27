@@ -3,7 +3,6 @@ import glob
 import math
 import igl
 import pytorch3d.ops
-import tqdm
 import numpy as np
 from os.path import join
 
@@ -152,7 +151,7 @@ def calc_cano_weight_volume(data_dir, type: str = 'smplh', stage: int = 0):
 
     grids = []
     import array
-    for fn in fn_list:
+    for fn in tqdm(fn_list):
         with open(fn, 'rb') as f:
             bytes = f.read()
         grid_res = 2 ** depth
