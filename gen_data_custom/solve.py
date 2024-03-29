@@ -23,8 +23,11 @@ if __name__ == "__main__":
     if args.type == 'smplh':
         num_joints = 52
         depth = 7
-        tmp_dir = os.path.join(args.data_dir, 'tmp')
-        point_interpolant_exe = './point_interpolant'
-        solve(num_joints, ".\\bins\\PointInterpolant.exe", depth, tmp_dir=tmp_dir)
+    elif args.type == 'smplx':
+        num_joints = 55
+        depth = 7
     else:
         raise ValueError('Not implemented yet')
+    tmp_dir = os.path.join(args.data_dir, 'tmp')
+    point_interpolant_exe = './point_interpolant'
+    solve(num_joints, ".\\bins\\PointInterpolant.exe", depth, tmp_dir=tmp_dir)

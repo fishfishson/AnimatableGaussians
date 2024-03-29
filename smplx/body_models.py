@@ -1434,12 +1434,12 @@ class SMPLXLayer(SMPLX):
 
         shapedirs = torch.cat([self.shapedirs, self.expr_dirs], dim=-1)
 
-        vertices, joints = lbs(shape_components, full_pose, self.v_template,
-                               shapedirs, self.posedirs,
-                               self.J_regressor, self.parents,
-                               self.lbs_weights,
-                               pose2rot=False,
-                               )
+        vertices, joints, A = lbs(shape_components, full_pose, self.v_template,
+                                  shapedirs, self.posedirs,
+                                  self.J_regressor, self.parents,
+                                  self.lbs_weights, 
+                                  pose2rot=False,
+                                  return_affine_mat=True)
 
         lmk_faces_idx = self.lmk_faces_idx.unsqueeze(
             dim=0).expand(batch_size, -1).contiguous()
@@ -1476,6 +1476,7 @@ class SMPLXLayer(SMPLX):
         if transl is not None:
             joints += transl.unsqueeze(dim=1)
             vertices += transl.unsqueeze(dim=1)
+            A[:, :, :3, 3] += transl.unsqueeze(dim=1)
 
         output = SMPLXOutput(vertices=vertices if return_verts else None,
                              joints=joints,
@@ -1487,7 +1488,8 @@ class SMPLXLayer(SMPLX):
                              right_hand_pose=right_hand_pose,
                              jaw_pose=jaw_pose,
                              transl=transl,
-                             full_pose=full_pose if return_full_pose else None)
+                             full_pose=full_pose if return_full_pose else None,
+                             A=A,)
         return output
 
 

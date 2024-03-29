@@ -1,3 +1,5 @@
+import os
+from os.path import join
 import platform
 import torch
 import torch.nn as nn
@@ -18,29 +20,45 @@ class AvatarNet(nn.Module):
         super(AvatarNet, self).__init__()
         self.opt = opt
 
+        self.size = opt.get('size', 1024)
+        if self.size == 1024:
+            smpl_pos_map_dir = 'smpl_pos_map'
+        else:
+            smpl_pos_map_dir = f'smpl_pos_map_{self.size}'
         self.random_style = opt.get('random_style', False)
         self.with_viewdirs = opt.get('with_viewdirs', True)
 
         # init canonical gausssian model
         self.max_sh_degree = 0
         self.cano_gaussian_model = GaussianModel(sh_degree = self.max_sh_degree)
-        cano_smpl_map = cv.imread(config.opt['train']['data']['data_dir'] + '/cano_smpl_pos_map.exr', cv.IMREAD_UNCHANGED)
+        if os.path.exists(join(config.opt['train']['data']['data_dir'], 'cano_smpl_pos_map.exr')):
+            cano_smpl_map = cv.imread(config.opt['train']['data']['data_dir'] + '/cano_smpl_pos_map.exr', cv.IMREAD_UNCHANGED)
+        else:
+            cano_smpl_map = cv.imread(join(config.opt['train']['data']['data_dir'], f'{smpl_pos_map_dir}/cano_smpl_pos_map.exr'), cv.IMREAD_UNCHANGED)
         self.cano_smpl_map = torch.from_numpy(cano_smpl_map).to(torch.float32).to(config.device)
         self.cano_smpl_mask = torch.linalg.norm(self.cano_smpl_map, dim = -1) > 0.
         self.init_points = self.cano_smpl_map[self.cano_smpl_mask]
-        self.lbs = torch.from_numpy(np.load(config.opt['train']['data']['data_dir'] + '/init_pts_lbs.npy')).to(torch.float32).to(config.device)
+        if os.path.exists(join(config.opt['train']['data']['data_dir'], 'init_pts_lbs.npy')):
+            self.lbs = torch.from_numpy(np.load(config.opt['train']['data']['data_dir'] + '/init_pts_lbs.npy')).to(torch.float32).to(config.device)
+        else:
+            self.lbs = torch.from_numpy(np.load(join(config.opt['train']['data']['data_dir'], f'{smpl_pos_map_dir}/init_pts_lbs.npy'))).to(torch.float32).to(config.device)
         self.cano_gaussian_model.create_from_pcd(self.init_points, torch.rand_like(self.init_points), spatial_lr_scale = 2.5)
 
-        self.color_net = DualStyleUNet(inp_size = 512, inp_ch = 3, out_ch = 3, out_size = 1024, style_dim = 512, n_mlp = 2)
-        self.position_net = DualStyleUNet(inp_size = 512, inp_ch = 3, out_ch = 3, out_size = 1024, style_dim = 512, n_mlp = 2)
-        self.other_net = DualStyleUNet(inp_size = 512, inp_ch = 3, out_ch = 8, out_size = 1024, style_dim = 512, n_mlp = 2)
+        inp_size = self.size // 2
+        out_size = self.size
+        self.color_net = DualStyleUNet(inp_size = inp_size, inp_ch = 3, out_ch = 3, out_size = out_size, style_dim = 512, n_mlp = 2)
+        self.position_net = DualStyleUNet(inp_size = inp_size, inp_ch = 3, out_ch = 3, out_size = out_size, style_dim = 512, n_mlp = 2)
+        self.other_net = DualStyleUNet(inp_size = inp_size, inp_ch = 3, out_ch = 8, out_size = out_size, style_dim = 512, n_mlp = 2)
 
         self.color_style = torch.ones([1, self.color_net.style_dim], dtype=torch.float32, device=config.device) / np.sqrt(self.color_net.style_dim)
         self.position_style = torch.ones([1, self.position_net.style_dim], dtype=torch.float32, device=config.device) / np.sqrt(self.position_net.style_dim)
         self.other_style = torch.ones([1, self.other_net.style_dim], dtype=torch.float32, device=config.device) / np.sqrt(self.other_net.style_dim)
 
         if self.with_viewdirs:
-            cano_nml_map = cv.imread(config.opt['train']['data']['data_dir'] + '/cano_smpl_nml_map.exr', cv.IMREAD_UNCHANGED)
+            if os.path.exists(join(config.opt['train']['data']['data_dir'], 'cano_smpl_nml_map.exr')):
+                cano_nml_map = cv.imread(config.opt['train']['data']['data_dir'] + '/cano_smpl_nml_map.exr', cv.IMREAD_UNCHANGED)
+            else:
+                cano_nml_map = cv.imread(join(config.opt['train']['data']['data_dir'], f'{smpl_pos_map_dir}/cano_smpl_nml_map.exr'), cv.IMREAD_UNCHANGED)
             self.cano_nml_map = torch.from_numpy(cano_nml_map).to(torch.float32).to(config.device)
             self.cano_nmls = self.cano_nml_map[self.cano_smpl_mask]
             self.viewdir_net = nn.Sequential(

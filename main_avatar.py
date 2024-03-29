@@ -39,7 +39,7 @@ class AvatarTrainer:
         self.opt = opt
         self.patch_size = 512
         self.iter_idx = 0
-        self.iter_num = 800000
+        self.iter_num = int(self.opt['train'].get('iter_num', 800000))
         self.lr_init = float(self.opt['train'].get('lr_init', 5e-4))
 
         avatar_module = self.opt['model'].get('module', 'network.avatar')
@@ -271,8 +271,11 @@ class AvatarTrainer:
         dataset_module = self.opt['train'].get('dataset', 'MvRgbDatasetAvatarReX')
         MvRgbDataset = importlib.import_module('dataset.dataset_mv_rgb').__getattribute__(dataset_module)
         self.dataset = MvRgbDataset(**self.opt['train']['data'])
+        self.test_dataset = MvRgbDataset(**self.opt['test']['data'], training = False)
         batch_size = self.opt['train']['batch_size']
         num_workers = self.opt['train']['num_workers']
+        pretrain_steps = self.opt['train']['pretrain_steps']
+        pretrain_eval_interval = self.opt['train']['pretrain_eval_interval']
         batch_num = len(self.dataset) // batch_size
         dataloader = torch.utils.data.DataLoader(self.dataset,
                                                  batch_size = batch_size,
@@ -319,10 +322,10 @@ class AvatarTrainer:
                     with open(os.path.join(log_dir, 'loss.txt'), 'a') as fp:
                         fp.write(log_info + '\n')
 
-                if self.iter_idx % 1000 == 0 and self.iter_idx != 0:
+                if self.iter_idx % pretrain_eval_interval == 0 and self.iter_idx != 0:
                     self.mini_test(pretraining = True)
 
-                if self.iter_idx == 5000:
+                if self.iter_idx == pretrain_steps:
                     model_folder = self.opt['train']['net_ckpt_dir'] + '/pretrained'
                     os.makedirs(model_folder, exist_ok = True)
                     self.save_ckpt(model_folder, save_optm = True)
@@ -333,6 +336,7 @@ class AvatarTrainer:
         dataset_module = self.opt['train'].get('dataset', 'MvRgbDatasetAvatarReX')
         MvRgbDataset = importlib.import_module('dataset.dataset_mv_rgb').__getattribute__(dataset_module)
         self.dataset = MvRgbDataset(**self.opt['train']['data'])
+        self.test_dataset = MvRgbDataset(**self.opt['test']['data'], training = False)
         batch_size = self.opt['train']['batch_size']
         num_workers = self.opt['train']['num_workers']
         batch_num = len(self.dataset) // batch_size
@@ -455,78 +459,82 @@ class AvatarTrainer:
 
         img_factor = self.opt['train'].get('eval_img_factor', 1.0)
         # training data
-        pose_idx, view_idx = self.opt['train'].get('eval_training_ids', (310, 19))
-        intr = self.dataset.intr_mats[view_idx].copy()
-        intr[:2] *= img_factor
-        item = self.dataset.getitem(0,
-                                    pose_idx = pose_idx,
-                                    view_idx = view_idx,
-                                    training = False,
-                                    eval = True,
-                                    img_h = int(self.dataset.img_heights[view_idx] * img_factor),
-                                    img_w = int(self.dataset.img_widths[view_idx] * img_factor),
-                                    extr = self.dataset.extr_mats[view_idx],
-                                    intr = intr,
-                                    exact_hand_pose = True)
-        items = net_util.to_cuda(item, add_batch = False)
+        # pose_idx, view_idx = self.opt['train'].get('eval_training_ids', (0, 0))
+        test_inds = np.random.choice(len(self.test_dataset), 10)
+        for idx in test_inds:
+            pose_idx, view_idx = self.test_dataset.data_list[idx]
+            intr = self.test_dataset.intr_mats[view_idx].copy()
+            intr[:2] *= img_factor
+            item = self.test_dataset.getitem(0,
+                                        pose_idx= pose_idx,
+                                        view_idx = view_idx,
+                                        training = False,
+                                        eval = True,
+                                        img_h = int(self.test_dataset.img_heights[view_idx] * img_factor),
+                                        img_w = int(self.test_dataset.img_widths[view_idx] * img_factor),
+                                        extr = self.test_dataset.extr_mats[view_idx],
+                                        intr = intr,
+                                        exact_hand_pose = True)
+            items = net_util.to_cuda(item, add_batch = False)
 
-        gs_render = self.avatar_net.render(items, self.bg_color)
-        # gs_render = self.avatar_net.render_debug(items)
-        rgb_map = gs_render['rgb_map']
-        rgb_map.clip_(0., 1.)
-        rgb_map = (rgb_map.cpu().numpy() * 255).astype(np.uint8)
-        # cv.imshow('rgb_map', rgb_map.cpu().numpy())
-        # cv.waitKey(0)
-        if not pretraining:
-            output_dir = self.opt['train']['net_ckpt_dir'] + '/eval/training'
-        else:
-            output_dir = self.opt['train']['net_ckpt_dir'] + '/eval_pretrain/training'
-        gt_image, _ = self.dataset.load_color_mask_images(pose_idx, view_idx)
-        if gt_image is not None:
-            gt_image = cv.resize(gt_image, (0, 0), fx = img_factor, fy = img_factor)
-            rgb_map = np.concatenate([rgb_map, gt_image], 1)
-        os.makedirs(output_dir, exist_ok = True)
-        cv.imwrite(output_dir + '/iter_%d.jpg' % self.iter_idx, rgb_map)
+            gs_render = self.avatar_net.render(items, self.bg_color)
+            # gs_render = self.avatar_net.render_debug(items)
+            rgb_map = gs_render['rgb_map']
+            rgb_map.clip_(0., 1.)
+            rgb_map = (rgb_map.cpu().numpy() * 255).astype(np.uint8)
+            # cv.imshow('rgb_map', rgb_map.cpu().numpy())
+            # cv.waitKey(0)
+            if not pretraining:
+                output_dir = self.opt['train']['net_ckpt_dir'] + '/eval/training'
+            else:
+                output_dir = self.opt['train']['net_ckpt_dir'] + '/eval_pretrain/training'
+            gt_image, _ = self.test_dataset.load_color_mask_images(pose_idx, view_idx)
+            if gt_image is not None:
+                gt_image = cv.resize(gt_image, (0, 0), fx = img_factor, fy = img_factor)
+                rgb_map = np.concatenate([rgb_map, gt_image], 1)
+            os.makedirs(output_dir, exist_ok = True)
+            cv.imwrite(output_dir + f'/iter_{self.iter_idx:08d}_{pose_idx:06d}_{view_idx:04d}.jpg', rgb_map)
+        
         if eval_cano_pts:
             os.makedirs(output_dir + '/cano_pts', exist_ok = True)
             save_mesh_as_ply(output_dir + '/cano_pts/iter_%d.ply' % self.iter_idx, (self.avatar_net.init_points + gs_render['offset']).cpu().numpy())
 
         # training data
-        pose_idx, view_idx = self.opt['train'].get('eval_testing_ids', (310, 19))
-        intr = self.dataset.intr_mats[view_idx].copy()
-        intr[:2] *= img_factor
-        item = self.dataset.getitem(0,
-                                    pose_idx = pose_idx,
-                                    view_idx = view_idx,
-                                    training = False,
-                                    eval = True,
-                                    img_h = int(self.dataset.img_heights[view_idx] * img_factor),
-                                    img_w = int(self.dataset.img_widths[view_idx] * img_factor),
-                                    extr = self.dataset.extr_mats[view_idx],
-                                    intr = intr,
-                                    exact_hand_pose = True)
-        items = net_util.to_cuda(item, add_batch = False)
+        # pose_idx, view_idx = self.opt['train'].get('eval_testing_ids', (310, 19))
+        # intr = self.dataset.intr_mats[view_idx].copy()
+        # intr[:2] *= img_factor
+        # item = self.dataset.getitem(0,
+        #                             pose_idx = pose_idx,
+        #                             view_idx = view_idx,
+        #                             training = False,
+        #                             eval = True,
+        #                             img_h = int(self.dataset.img_heights[view_idx] * img_factor),
+        #                             img_w = int(self.dataset.img_widths[view_idx] * img_factor),
+        #                             extr = self.dataset.extr_mats[view_idx],
+        #                             intr = intr,
+        #                             exact_hand_pose = True)
+        # items = net_util.to_cuda(item, add_batch = False)
 
-        gs_render = self.avatar_net.render(items, bg_color = self.bg_color)
-        # gs_render = self.avatar_net.render_debug(items)
-        rgb_map = gs_render['rgb_map']
-        rgb_map.clip_(0., 1.)
-        rgb_map = (rgb_map.cpu().numpy() * 255).astype(np.uint8)
-        # cv.imshow('rgb_map', rgb_map.cpu().numpy())
-        # cv.waitKey(0)
-        if not pretraining:
-            output_dir = self.opt['train']['net_ckpt_dir'] + '/eval/testing'
-        else:
-            output_dir = self.opt['train']['net_ckpt_dir'] + '/eval_pretrain/testing'
-        gt_image, _ = self.dataset.load_color_mask_images(pose_idx, view_idx)
-        if gt_image is not None:
-            gt_image = cv.resize(gt_image, (0, 0), fx = img_factor, fy = img_factor)
-            rgb_map = np.concatenate([rgb_map, gt_image], 1)
-        os.makedirs(output_dir, exist_ok = True)
-        cv.imwrite(output_dir + '/iter_%d.jpg' % self.iter_idx, rgb_map)
-        if eval_cano_pts:
-            os.makedirs(output_dir + '/cano_pts', exist_ok = True)
-            save_mesh_as_ply(output_dir + '/cano_pts/iter_%d.ply' % self.iter_idx, (self.avatar_net.init_points + gs_render['offset']).cpu().numpy())
+        # gs_render = self.avatar_net.render(items, bg_color = self.bg_color)
+        # # gs_render = self.avatar_net.render_debug(items)
+        # rgb_map = gs_render['rgb_map']
+        # rgb_map.clip_(0., 1.)
+        # rgb_map = (rgb_map.cpu().numpy() * 255).astype(np.uint8)
+        # # cv.imshow('rgb_map', rgb_map.cpu().numpy())
+        # # cv.waitKey(0)
+        # if not pretraining:
+        #     output_dir = self.opt['train']['net_ckpt_dir'] + '/eval/testing'
+        # else:
+        #     output_dir = self.opt['train']['net_ckpt_dir'] + '/eval_pretrain/testing'
+        # gt_image, _ = self.dataset.load_color_mask_images(pose_idx, view_idx)
+        # if gt_image is not None:
+        #     gt_image = cv.resize(gt_image, (0, 0), fx = img_factor, fy = img_factor)
+        #     rgb_map = np.concatenate([rgb_map, gt_image], 1)
+        # os.makedirs(output_dir, exist_ok = True)
+        # cv.imwrite(output_dir + '/iter_%d.jpg' % self.iter_idx, rgb_map)
+        # if eval_cano_pts:
+        #     os.makedirs(output_dir + '/cano_pts', exist_ok = True)
+        #     save_mesh_as_ply(output_dir + '/cano_pts/iter_%d.ply' % self.iter_idx, (self.avatar_net.init_points + gs_render['offset']).cpu().numpy())
 
         self.avatar_net.train()
 

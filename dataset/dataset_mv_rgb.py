@@ -1,18 +1,23 @@
 import math
 import glob
 import os
+from os.path import join
 import numpy as np
 import cv2 as cv
 import torch
 from torch.utils.data import Dataset
+import pickle
+import smplx
 
-# import smplx
 from easyvolcap.utils.base_utils import *
+from easyvolcap.utils.data_utils import load_dotdict, to_tensor, to_cuda
+
 from easymocap.bodymodel.smplx import SMPLHModel, SMPLModel
 from easymocap.mytools.camera_utils import read_cameras
 from easymocap.bodymodel.lbs import batch_rodrigues
 
 import config
+from smplx.lbs import batch_rodrigues 
 import utils.nerf_util as nerf_util
 import utils.visualize_util as visualize_util
 import dataset.commons as commons
@@ -30,7 +35,7 @@ class MvRgbDatasetCustom(Dataset):
         load_smpl_pos_map = False,
         load_smpl_nml_map = False,
         mode = '3dgs',
-        H = 2560, 
+        H = 2560,
         W = 1440,
     ):
         super(MvRgbDatasetCustom).__init__()
@@ -376,6 +381,314 @@ class MvRgbDatasetCustom(Dataset):
         new_pose_conds = new_pose_conds.reshape(-1, 3)
         return new_pose_conds
 
+class MvRgbDatasetCustomSMPLX(Dataset):
+    @torch.no_grad()
+    def __init__(self,
+                 data_dir,
+                 pose_pkl = 'smpl_params.pkl',
+                 frame_range = None,
+                 used_cam_ids = None,
+                 training = True,
+                 subject_name = None,
+                 load_smpl_pos_map = False,
+                 smpl_pos_map_size = 1024,
+                 load_smpl_nml_map = False,
+                 mode = '3dgs',
+                 H = 2560,
+                 W = 1440,
+                 ):
+        super(MvRgbDatasetCustom).__init__()
+
+        self.data_dir = data_dir
+        self.pose_pkl = pose_pkl
+        self.training = training
+        self.subject_name = subject_name
+        if self.subject_name is None:
+            self.subject_name = os.path.basename(self.data_dir)
+        self.load_smpl_pos_map = load_smpl_pos_map
+        self.smpl_pos_map_size = smpl_pos_map_size
+        self.load_smpl_nml_map = load_smpl_nml_map
+        self.mode = mode  # '3dgs' or 'nerf'
+        self.H = H
+        self.W = W
+
+        self.load_cam_data()
+        self.load_smpl_data()
+
+        self.smpl_model = smplx.SMPLXLayer(model_path='./data/bodymodels/smplx/smplx',
+                                           gender='neutral',
+                                           use_compressed=False,
+                                           use_face_contour=True,
+                                           num_expression_coeffs=100)
+        print(self.smpl_model)
+        
+        pose_list = [int(x) for x in list(self.smpl_data.keys())]
+        if frame_range is not None:
+            print('WARNING: frame_range is not supported yet!')
+            self.pose_list = [x for x in pose_list if x >= frame_range[0] and x < frame_range[1]]
+        else:
+            self.pose_list = pose_list
+
+        if used_cam_ids is not None:
+            self.used_cam_ids = used_cam_ids
+        else:
+            self.used_cam_ids = list(range(self.view_num))
+        print('# Used camera ids: ', self.used_cam_ids)
+        self.data_list = []
+        for pose_idx in self.pose_list:
+            for view_idx in self.used_cam_ids:
+                self.data_list.append((pose_idx, view_idx))
+        
+        print('# Dataset contains %d items' % len(self))
+
+        # SMPL related
+        betas = np.load(join(self.data_dir, 'cano_betas.npy'))
+        self.cano_smpl_betas = torch.from_numpy(betas).float()
+        self.cano_smpl_global_orient = batch_rodrigues(config.cano_smpl_global_orient.reshape(-1, 3))[None]
+        self.cano_smpl_transl = config.cano_smpl_transl[None]
+        self.cano_smpl_body_pose = batch_rodrigues(config.cano_smpl_body_pose.reshape(-1, 3))[None]
+        ret = self.smpl_model.forward(betas=self.cano_smpl_betas,
+                                      global_orient=self.cano_smpl_global_orient,
+                                      transl=self.cano_smpl_transl,
+                                      body_pose=self.cano_smpl_body_pose)
+        self.cano_smpl = {k: v[0] for k, v in ret.items() if isinstance(v, torch.Tensor)}
+        self.inv_cano_jnt_mats = torch.linalg.inv(self.cano_smpl['A'])
+        min_xyz = self.cano_smpl['vertices'].min(0)[0]
+        max_xyz = self.cano_smpl['vertices'].max(0)[0]
+        self.cano_smpl_center = 0.5 * (min_xyz + max_xyz)
+        min_xyz[:2] -= 0.05
+        max_xyz[:2] += 0.05
+        min_xyz[2] -= 0.15
+        max_xyz[2] += 0.15
+        self.cano_bounds = torch.stack([min_xyz, max_xyz], 0).to(torch.float32).numpy()
+        self.smpl_faces = self.smpl_model.faces.astype(np.int32)
+
+        commons._initialize_hands(self)
+
+    def load_cam_data(self):
+        # cam_data = json.load(open(self.data_dir + '/calibration_full.json', 'r'))
+        cam_data = read_cameras(self.data_dir)
+        self.cam_names = list(cam_data.keys())
+        self.view_num = len(self.cam_names)
+        self.extr_mats = []
+        for view_idx in range(self.view_num):
+            extr_mat = np.identity(4, np.float32)
+            extr_mat[:3, :3] = np.array(cam_data[self.cam_names[view_idx]]['R'], np.float32).reshape(3, 3)
+            extr_mat[:3, 3:] = np.array(cam_data[self.cam_names[view_idx]]['T'], np.float32)
+            self.extr_mats.append(extr_mat)
+        self.intr_mats = [np.array(cam_data[self.cam_names[view_idx]]['K'], np.float32).reshape(3, 3) for view_idx in range(self.view_num)]
+        if cam_data[self.cam_names[0]]['H'] != 0 and cam_data[self.cam_names[0]]['W'] != 0:
+            self.img_heights = [cam_data[self.cam_names[view_idx]]['H'] for view_idx in range(self.view_num)]
+            self.img_widths = [cam_data[self.cam_names[view_idx]]['W'] for view_idx in range(self.view_num)]
+        else:
+            self.img_heights = [self.H for view_idx in range(self.view_num)]
+            self.img_widths = [self.W for view_idx in range(self.view_num)]
+
+    def load_smpl_data(self):
+        with open(join(self.data_dir, self.pose_pkl), 'rb') as f:
+            self.smpl_data = to_tensor(dotdict(pickle.load(f)))
+    
+    def __len__(self):
+        if self.training:
+            return len(self.data_list)
+        else:
+            return len(self.pose_list)
+    
+    def __getitem__(self, index):
+        return self.getitem(index, self.training)
+    
+    def getitem(self, index, training = True, **kwargs):
+        if training or kwargs.get('eval', False):  # training or evaluation
+            pose_idx, view_idx = self.data_list[index]
+            pose_idx = kwargs['pose_idx'] if 'pose_idx' in kwargs else pose_idx
+            view_idx = kwargs['view_idx'] if 'view_idx' in kwargs else view_idx
+            data_idx = (pose_idx, view_idx)
+            if not training:
+                print('data index: (%d, %d)' % (pose_idx, view_idx))
+        else:  # testing
+            pose_idx = self.pose_list[index]
+            data_idx = pose_idx
+            print('data index: %d' % pose_idx)
+
+        # SMPL
+        smpl_data = self.smpl_data[f'{pose_idx:06d}']
+        with torch.no_grad():
+            live_smpl = self.smpl_model.forward(
+                betas=self.cano_smpl_betas,
+                global_orient=smpl_data['global_orient'],
+                transl=smpl_data['transl'],
+                body_pose=smpl_data['body_pose'],
+                left_hand_pose=smpl_data['left_hand_pose'],
+                right_hand_pose=smpl_data['right_hand_pose'],
+                jaw_pose=smpl_data['jaw_pose'],
+                expression=smpl_data['expression'],
+                leye_pose=smpl_data['leye_pose'],
+                reye_pose=smpl_data['reye_pose'],
+            )
+            cano_smpl = self.smpl_model.forward(
+                betas=self.cano_smpl_betas,
+                global_orient=self.cano_smpl_global_orient,
+                transl=self.cano_smpl_transl,
+                body_pose=self.cano_smpl_body_pose,
+                jaw_pose=smpl_data['jaw_pose'],
+                expression=smpl_data['expression'],
+            )
+            live_smpl_woRoot = self.smpl_model.forward(
+                betas=self.cano_smpl_betas,
+                global_orient=self.cano_smpl_global_orient,
+                transl=self.cano_smpl_transl,
+                body_pose=smpl_data['body_pose'],
+                left_hand_pose=smpl_data['left_hand_pose'],
+                right_hand_pose=smpl_data['right_hand_pose'],
+                jaw_pose=smpl_data['jaw_pose'],
+                expression=smpl_data['expression'],
+                leye_pose=smpl_data['leye_pose'],
+                reye_pose=smpl_data['reye_pose'],
+            )
+
+        data_item = dict()
+        if self.load_smpl_pos_map:
+            if self.smpl_pos_map_size == 1024:
+                smpl_pos_map = cv.imread(self.data_dir + '/smpl_pos_map/%06d.exr' % pose_idx, cv.IMREAD_UNCHANGED)
+            else:
+                smpl_pos_map = cv.imread(self.data_dir + '/smpl_pos_map_%d/%06d.exr' % (self.smpl_pos_map_size, pose_idx), cv.IMREAD_UNCHANGED)
+            pos_map_size = smpl_pos_map.shape[1] // 2
+            smpl_pos_map = np.concatenate([smpl_pos_map[:, :pos_map_size], smpl_pos_map[:, pos_map_size:]], 2)
+            smpl_pos_map = smpl_pos_map.transpose((2, 0, 1))
+            data_item['smpl_pos_map'] = smpl_pos_map
+
+        if self.load_smpl_nml_map:
+            if self.smpl_pos_map_size == 1024:
+                smpl_nml_map = cv.imread(self.data_dir + '/smpl_nml_map/%06d.jpg' % pose_idx, cv.IMREAD_UNCHANGED)
+            else:
+                smpl_nml_map = cv.imread(self.data_dir + '/smpl_nml_map_%d/%06d.jpg' % (self.smpl_pos_map_size, pose_idx), cv.IMREAD_UNCHANGED)
+            smpl_nml_map = (smpl_nml_map / 255.).astype(np.float32)
+            nml_map_size = smpl_nml_map.shape[1] // 2
+            smpl_nml_map = np.concatenate([smpl_nml_map[:, :nml_map_size], smpl_nml_map[:, nml_map_size:]], 2)
+            smpl_nml_map = smpl_nml_map.transpose((2, 0, 1))
+            data_item['smpl_nml_map'] = smpl_nml_map
+
+        # data_item['joints'] = live_smpl.joints[0, :22]
+        # data_item['kin_parent'] = self.smpl_model.parents[:22].to(torch.long)
+        data_item['item_idx'] = index
+        data_item['data_idx'] = data_idx
+        data_item['time_stamp'] = np.array(pose_idx, np.float32)
+        data_item['global_orient'] = smpl_data['global_orient']
+        data_item['transl'] = smpl_data['transl']
+        data_item['live_smpl_v'] = live_smpl.vertices[0]
+        data_item['live_smpl_v_woRoot'] = live_smpl_woRoot.vertices[0]
+        data_item['cano_smpl_v'] = cano_smpl.vertices[0]
+        # data_item['cano_jnts'] = cano_smpl.joints[0]
+        data_item['cano2live_jnt_mats'] = torch.matmul(live_smpl.A[0], torch.linalg.inv(cano_smpl.A[0]))
+        # data_item['cano2live_jnt_mats_woRoot'] = torch.matmul(live_smpl_woRoot.A[0], torch.linalg.inv(cano_smpl.A[0]))
+        data_item['cano_smpl_center'] = self.cano_smpl_center
+        data_item['cano_bounds'] = self.cano_bounds
+        data_item['smpl_faces'] = self.smpl_faces
+        min_xyz = live_smpl.vertices[0].min(0)[0] - 0.15
+        max_xyz = live_smpl.vertices[0].max(0)[0] + 0.15
+        live_bounds = torch.stack([min_xyz, max_xyz], 0).to(torch.float32).numpy()
+        data_item['live_bounds'] = live_bounds
+
+        color_img, mask_img = self.load_color_mask_images(pose_idx, view_idx)
+
+        color_img = (color_img / 255.).astype(np.float32)
+
+        boundary_mask_img, mask_img = self.get_boundary_mask(mask_img)
+
+        if self.mode == '3dgs':
+            data_item.update({
+                'img_h': color_img.shape[0],
+                'img_w': color_img.shape[1],
+                'extr': self.extr_mats[view_idx],
+                'intr': self.intr_mats[view_idx],
+                'color_img': color_img,
+                'mask_img': mask_img,
+                'boundary_mask_img': boundary_mask_img
+            })
+        elif self.mode == 'nerf':
+            depth_img = np.zeros(color_img.shape[:2], np.float32)
+            nerf_random = nerf_util.sample_randomly_for_nerf_rendering(
+                color_img, mask_img, depth_img,
+                self.extr_mats[view_idx], self.intr_mats[view_idx],
+                live_bounds,
+                unsample_region_mask = boundary_mask_img
+            )
+            data_item.update({
+                'nerf_random': nerf_random,
+                'extr': self.extr_mats[view_idx],
+                'intr': self.intr_mats[view_idx]
+            })
+        else:
+            raise ValueError('Invalid dataset mode!')
+
+        return data_item
+    
+    def load_color_mask_images(self, pose_idx, view_idx):
+        cam_name = self.cam_names[view_idx]
+        color_img = cv.imread(self.data_dir + '/images/%s/%06d.jpg' % (cam_name, pose_idx), cv.IMREAD_UNCHANGED)
+        mask_img = cv.imread(self.data_dir + '/masks/%s/%06d.jpg' % (cam_name, pose_idx), cv.IMREAD_UNCHANGED)
+        return color_img, mask_img
+
+    @staticmethod
+    def get_boundary_mask(mask, kernel_size = 5):
+        """
+        :param mask: np.uint8
+        :param kernel_size:
+        :return:
+        """
+        mask_bk = mask.copy()
+        thres = 128
+        mask[mask < thres] = 0
+        mask[mask > thres] = 1
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        mask_erode = cv.erode(mask.copy(), kernel)
+        mask_dilate = cv.dilate(mask.copy(), kernel)
+        boundary_mask = (mask_dilate - mask_erode) == 1
+        boundary_mask = np.logical_or(boundary_mask,
+                                      np.logical_and(mask_bk > 5, mask_bk < 250))
+
+        # boundary_mask_resized = cv.resize(boundary_mask.astype(np.uint8), (0, 0), fx = 0.5, fy = 0.5)
+        # cv.imshow('boundary_mask', boundary_mask_resized.astype(np.uint8) * 255)
+        # cv.waitKey(0)
+
+        return boundary_mask, mask == 1
+
+    def compute_pca(self, n_components = 10):
+        from sklearn.decomposition import PCA
+        from tqdm import tqdm
+        import joblib
+
+        if not os.path.exists(self.data_dir + '/smpl_pos_map/pca_%d.ckpt' % n_components):
+            pose_conds = []
+            mask = None
+            for pose_idx in tqdm(self.pose_list, desc = 'Loading position maps...'):
+                pose_map = cv.imread(self.data_dir + '/smpl_pos_map/%06d.exr' % pose_idx, cv.IMREAD_UNCHANGED)
+                pose_map = pose_map[:, :pose_map.shape[1] // 2]
+                if mask is None:
+                    mask = np.linalg.norm(pose_map, axis = -1) > 1e-6
+                pose_conds.append(pose_map[mask])
+            pose_conds = np.stack(pose_conds, 0)
+            pose_conds = pose_conds.reshape(pose_conds.shape[0], -1)
+            self.pca = PCA(n_components = n_components)
+            self.pca.fit(pose_conds)
+            joblib.dump(self.pca, self.data_dir + '/smpl_pos_map/pca_%d.ckpt' % n_components)
+            self.pos_map_mask = mask
+        else:
+            self.pca = joblib.load(self.data_dir + '/smpl_pos_map/pca_%d.ckpt' % n_components)
+            pose_map = cv.imread(sorted(glob.glob(self.data_dir + '/smpl_pos_map/0*.exr'))[0], cv.IMREAD_UNCHANGED)
+            pose_map = pose_map[:, :pose_map.shape[1] // 2]
+            self.pos_map_mask = np.linalg.norm(pose_map, axis = -1) > 1e-6
+
+    def transform_pca(self, pose_conds, sigma_pca = 2.):
+        pose_conds = pose_conds.reshape(1, -1)
+        lowdim_pose_conds = self.pca.transform(pose_conds)
+        std = np.sqrt(self.pca.explained_variance_)
+        lowdim_pose_conds = np.maximum(lowdim_pose_conds, -sigma_pca * std)
+        lowdim_pose_conds = np.minimum(lowdim_pose_conds, sigma_pca * std)
+        new_pose_conds = self.pca.inverse_transform(lowdim_pose_conds)
+        new_pose_conds = new_pose_conds.reshape(-1, 3)
+        return new_pose_conds
+
 class MvRgbDatasetBase(Dataset):
     @torch.no_grad()
     def __init__(
@@ -472,12 +785,12 @@ class MvRgbDatasetBase(Dataset):
             pose_idx = kwargs['pose_idx'] if 'pose_idx' in kwargs else pose_idx
             view_idx = kwargs['view_idx'] if 'view_idx' in kwargs else view_idx
             data_idx = (pose_idx, view_idx)
-            if not training:
-                print('data index: (%d, %d)' % (pose_idx, view_idx))
+            # if not training:
+            #     print('data index: (%d, %d)' % (pose_idx, view_idx))
         else:  # testing
             pose_idx = self.pose_list[index]
             data_idx = pose_idx
-            print('data index: %d' % pose_idx)
+            # print('data index: %d' % pose_idx)
 
         # SMPL
         with torch.no_grad():

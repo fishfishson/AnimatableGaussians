@@ -5,6 +5,7 @@ import igl
 import pytorch3d.ops
 import numpy as np
 from os.path import join
+import pickle
 
 import torch
 import trimesh
@@ -75,7 +76,11 @@ def solve(num_joints, point_interpolant_exe, depth=7, tmp_dir=None):
 @torch.no_grad()
 def calc_cano_weight_volume(data_dir, type: str = 'smplh', stage: int = 0):
     depth = 7
-    motion = to_tensor(load_dotdict(join(data_dir, 'motion.npz')))
+    if os.path.exists(join(data_dir, 'motino.npz')):
+        motion = to_tensor(load_dotdict(join(data_dir, 'motion.npz')))
+    if os.path.exists(join(data_dir, 'smpl_params_short.pkl')):
+        with open(join(data_dir, 'smpl_params_short.pkl'), 'rb') as f:
+            smpl_params = to_tensor(dotdict(pickle.load(f)))
 
     if type == 'smplh':
         # smpl_model = smplx.SMPLX(model_path = config.PROJ_DIR + '/smpl_files/smplx', gender = gender, use_pca = False, num_pca_comps = 45, flat_hand_mean = True, batch_size = 1)
@@ -89,8 +94,16 @@ def calc_cano_weight_volume(data_dir, type: str = 'smplh', stage: int = 0):
         bodymodel_cfg.cfg_hand.use_flat_mean = False
         bodymodel_cfg.cfg_hand.num_pca_comps = 12
         smpl_model = SMPLHModel(**bodymodel_cfg, device='cpu')
+    elif type == 'smplx':
+        import smplx
+        smpl_model = smplx.SMPLXLayer(model_path='./data/bodymodels/smplx/smplx',
+                                      gender='neutral',
+                                      use_compressed=False,
+                                      use_face_contour=True,
+                                      num_expression_coeffs=100)
     else:
         raise NotImplementedError
+    print(smpl_model)
 
     def get_grid_points(bounds, res):
         # voxel_size = (bounds[1] - bounds[0]) / (np.array(res, np.float32) - 1)
@@ -127,6 +140,27 @@ def calc_cano_weight_volume(data_dir, type: str = 'smplh', stage: int = 0):
         params.shapes = shapes[None]
         cano_smpl_verts = smpl_model(**params)[0]
         cano_smpl_faces = smpl_model.faces_tensor.long()
+    elif type == 'smplx':
+        import config
+        from smplx.lbs import batch_rodrigues
+        betas = []
+        for v in smpl_params.values():
+            betas.append(v['betas'])
+        betas = torch.stack(betas, 0)
+        print('betas shape:', betas.shape)
+        print(f'mean: {betas.mean(dim=0)}')
+        print(f'std: {betas.std(dim=0)}')
+        betas = betas.mean(dim=0)
+        np.save(join(data_dir, 'cano_betas.npy'), betas.numpy())
+        global_orient = batch_rodrigues(config.cano_smpl_global_orient.reshape(-1, 3))
+        transl = config.cano_smpl_transl
+        body_pose = batch_rodrigues(config.cano_smpl_body_pose.reshape(-1, 3))
+        cano_smpl = smpl_model.forward(betas=betas,
+                                       global_orient=global_orient[None],
+                                       transl=transl[None],
+                                       body_pose=body_pose[None])
+        cano_smpl_verts = cano_smpl.vertices[0]
+        cano_smpl_faces = smpl_model.faces_tensor
     else:
         raise NotImplementedError
 
@@ -138,11 +172,15 @@ def calc_cano_weight_volume(data_dir, type: str = 'smplh', stage: int = 0):
     
     tmp_dir = join(data_dir, 'tmp')
     os.makedirs(tmp_dir, exist_ok = True)
-    print(f'{smpl_model.weights.shape[-1]} joints to solve.')
 
     if stage == 0:
         cano_smpl_trimesh.export(join(data_dir, 'cano_smpl.ply'))
-        compute_lbs_grad(cano_smpl_trimesh, smpl_model.weights.cpu().numpy(), tmp_dir)
+        if type == 'smplh':
+            print(f'{smpl_model.weights.shape[-1]} joints to solve.')
+            compute_lbs_grad(cano_smpl_trimesh, smpl_model.weights.cpu().numpy(), tmp_dir)
+        elif type == 'smplx':
+            print(f'{smpl_model.lbs_weights.shape[-1]} joints to solve.')
+            compute_lbs_grad(cano_smpl_trimesh, smpl_model.lbs_weights.cpu().numpy(), tmp_dir)
         # solve(smpl_model.weights.shape[-1], ".\\bins\\PointInterpolant.exe", tmp_dir)
         exit()
 
@@ -186,7 +224,10 @@ def calc_cano_weight_volume(data_dir, type: str = 'smplh', stage: int = 0):
     pts = pts.reshape(-1, 3)
     dists, face_id, closest_pts = igl.signed_distance(pts, cano_smpl_trimesh.vertices, smpl_model.faces.astype(np.int32))
     triangles = cano_smpl_trimesh.vertices[smpl_model.faces[face_id]]
-    weights = smpl_model.weights.numpy()[smpl_model.faces[face_id]]
+    if type == 'smplh':
+        weights = smpl_model.weights.numpy()[smpl_model.faces[face_id]]
+    else:
+        weights = smpl_model.lbs_weights.numpy()[smpl_model.faces[face_id]]
     barycentric_weight = trimesh.triangles.points_to_barycentric(triangles, closest_pts)
     ori_weights = (barycentric_weight[:, :, None] * weights).sum(1)
     # weights[dists > 0.08] = 0.
