@@ -174,7 +174,7 @@ class AvatarNet(nn.Module):
 
             viewdirs_map = viewdirs_map[None, None]
             viewdirs_map = F.interpolate(viewdirs_map, None, 0.5, 'nearest')
-            front_viewdirs, back_viewdirs = torch.split(viewdirs_map, [512, 512], -1)
+            front_viewdirs, back_viewdirs = torch.split(viewdirs_map, [self.inp_size, self.inp_size], -1)
 
         front_viewdirs = self.opt.get('weight_viewdirs', 1.) * self.viewdir_net(front_viewdirs)
         back_viewdirs = self.opt.get('weight_viewdirs', 1.) * self.viewdir_net(back_viewdirs)
