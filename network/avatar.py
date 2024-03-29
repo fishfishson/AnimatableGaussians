@@ -21,6 +21,8 @@ class AvatarNet(nn.Module):
         self.opt = opt
 
         self.size = opt.get('size', 1024)
+        self.inp_size = self.size // 2
+        self.out_size = self.size
         if self.size == 1024:
             smpl_pos_map_dir = 'smpl_pos_map'
         else:
@@ -44,11 +46,9 @@ class AvatarNet(nn.Module):
             self.lbs = torch.from_numpy(np.load(join(config.opt['train']['data']['data_dir'], f'{smpl_pos_map_dir}/init_pts_lbs.npy'))).to(torch.float32).to(config.device)
         self.cano_gaussian_model.create_from_pcd(self.init_points, torch.rand_like(self.init_points), spatial_lr_scale = 2.5)
 
-        inp_size = self.size // 2
-        out_size = self.size
-        self.color_net = DualStyleUNet(inp_size = inp_size, inp_ch = 3, out_ch = 3, out_size = out_size, style_dim = 512, n_mlp = 2)
-        self.position_net = DualStyleUNet(inp_size = inp_size, inp_ch = 3, out_ch = 3, out_size = out_size, style_dim = 512, n_mlp = 2)
-        self.other_net = DualStyleUNet(inp_size = inp_size, inp_ch = 3, out_ch = 8, out_size = out_size, style_dim = 512, n_mlp = 2)
+        self.color_net = DualStyleUNet(inp_size = self.inp_size, inp_ch = 3, out_ch = 3, out_size = self.out_size, style_dim = 512, n_mlp = 2)
+        self.position_net = DualStyleUNet(inp_size = self.inp_size, inp_ch = 3, out_ch = 3, out_size = self.out_size, style_dim = 512, n_mlp = 2)
+        self.other_net = DualStyleUNet(inp_size = self.inp_size, inp_ch = 3, out_ch = 8, out_size = self.out_size, style_dim = 512, n_mlp = 2)
 
         self.color_style = torch.ones([1, self.color_net.style_dim], dtype=torch.float32, device=config.device) / np.sqrt(self.color_net.style_dim)
         self.position_style = torch.ones([1, self.position_net.style_dim], dtype=torch.float32, device=config.device) / np.sqrt(self.position_net.style_dim)
@@ -186,7 +186,7 @@ class AvatarNet(nn.Module):
         live_pos_map = torch.zeros_like(self.cano_smpl_map)
         live_pos_map[self.cano_smpl_mask] = live_pts
         live_pos_map = F.interpolate(live_pos_map.permute(2, 0, 1)[None], None, [0.5, 0.5], mode = 'nearest')[0]
-        live_pos_map = torch.cat(torch.split(live_pos_map, [512, 512], 2), 0)
+        live_pos_map = torch.cat(torch.split(live_pos_map, [self.inp_size, self.inp_size], 2), 0)
         items.update({
             'smpl_pos_map': live_pos_map
         })
