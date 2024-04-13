@@ -70,6 +70,7 @@ class SMPLHOutput(SMPLOutput):
 
 @dataclass
 class SMPLXOutput(SMPLHOutput):
+    landmarks: Optional[Tensor] = None
     expression: Optional[Tensor] = None
     jaw_pose: Optional[Tensor] = None
     A: Optional[Tensor] = None

@@ -38,9 +38,9 @@ def load_easymocap_params(param_dir: str, args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root', type=str, default='./data/0325data')
-    parser.add_argument('--motion_in', type=str, default='output-output-smpl-3d/smplfull')
+    parser.add_argument('--smplx', type=str, default='output-output-smpl-3d/smplfull')
     parser.add_argument('--motion_out', type=str, default='motion.npz')
-    parser.add_argument('--n_bones', type=int, default=52) 
+    parser.add_argument('--n_bones', type=int, default=52)
     args = parser.parse_args()
 
     motion_in = os.path.join(args.data_root, args.motion_in)

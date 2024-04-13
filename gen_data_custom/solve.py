@@ -16,14 +16,14 @@ def solve(num_joints, point_interpolant_exe, depth=7, tmp_dir=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Solve point interpolant')
-    parser.add_argument('--data_dir', type = str, default = './data/0116data')
-    parser.add_argument('--type', type = str, choices=['smpl', 'smplh', 'smplx'], default='smplh')
+    parser.add_argument('--data_dir', type = str, default = './data/30min_data_0')
+    parser.add_argument('--body_type', type = str, choices=['smpl', 'smplh', 'smplx'], default='smplx')
     args = parser.parse_args()
 
-    if args.type == 'smplh':
+    if args.body_type == 'smplh':
         num_joints = 52
         depth = 7
-    elif args.type == 'smplx':
+    elif args.body_type == 'smplx':
         num_joints = 55
         depth = 7
     else:

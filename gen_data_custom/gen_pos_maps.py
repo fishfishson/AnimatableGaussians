@@ -1,5 +1,6 @@
 import os
 from os.path import join
+import glob
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -12,6 +13,7 @@ os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 from easyvolcap.utils.base_utils import *
 from easyvolcap.utils.console_utils import *
 from easyvolcap.utils.data_utils import load_dotdict, to_tensor, to_cuda
+from easyvolcap.utils.parallel_utils import parallel_execution
 
 from pytorch3d.renderer import (
     look_at_view_transform,
@@ -301,27 +303,24 @@ if __name__ == '__main__':
     from argparse import ArgumentParser
 
     parser = ArgumentParser()
-    parser.add_argument('--data_dir', type = str, help = 'Data directory.', default='./data/0116data')
-    parser.add_argument('--type', type = str, choices=['smpl', 'smplh', 'smplx'], default = 'smplh')
+    parser.add_argument('--data_dir', type = str, help = 'Data directory.', default='./data/30min_data_0')
+    parser.add_argument('--body_type', type = str, choices=['smpl', 'smplh', 'smplx'], default = 'smplx')
+    parser.add_argument('--output_prefix', type=str, help='Output directory.', default='smpl_pos_map')
     parser.add_argument('--size', type = int, default = 1024, help = 'Size of the positional map.')
-    # parser.add_argument('-c', '--config_path', type = str, help = 'Configuration file path.')
+    parser.add_argument('--render_flame_mask', action='store_true', help='Render flame mask.', default=False)
+    parser.add_argument('--render_mano_mask', action='store_true', help='Render mano mask.', default=False)
+    parser.add_argument('--skip_pos_map', action='store_true', help='Skip positional map generation.', default=False)
     args = parser.parse_args()
-
-    if args.size == 1024:
-        output_dir = 'smpl_pos_map'
-    else:
-        output_dir = f'smpl_pos_map_{args.size}'
-    os.makedirs(join(args.data_dir, output_dir), exist_ok = True)
 
     # opt = yaml.load(open(args.config_path, encoding = 'UTF-8'), Loader = yaml.FullLoader)
     # dataset_module = opt['train'].get('dataset', 'MvRgbDatasetAvatarReX')
     # MvRgbDataset = importlib.import_module('dataset.dataset_mv_rgb').__getattribute__(dataset_module)
     # dataset = MvRgbDataset(**opt['train']['data'])
     # data_dir, frame_list = dataset.data_dir, dataset.pose_list
-    cano_renderer = Renderer(args.size, args.size, shader_name = 'vertex_attribute')
+    cano_renderer = Renderer(args.size, args.size, shader_name='vertex_attribute')
 
     # smpl_model = smplx.SMPLX(config.PROJ_DIR + '/smpl_files/smplx', gender = 'neutral', use_pca = False, num_pca_comps = 45, flat_hand_mean = True, batch_size = 1)
-    if args.type == 'smplh':
+    if args.body_type == 'smplh':
         # smpl_model = smplx.SMPLX(model_path = config.PROJ_DIR + '/smpl_files/smplx', gender = gender, use_pca = False, num_pca_comps = 45, flat_hand_mean = True, batch_size = 1)
         from easymocap.bodymodel.smplx import SMPLHModel
         bodymodel_cfg = dotdict()
@@ -333,26 +332,20 @@ if __name__ == '__main__':
         bodymodel_cfg.cfg_hand.use_flat_mean = False
         bodymodel_cfg.cfg_hand.num_pca_comps = 12
         smpl_model = SMPLHModel(**bodymodel_cfg, device='cpu')
-    elif args.type == 'smplx':
+    elif args.body_type == 'smplx':
         import smplx
         smpl_model = smplx.SMPLXLayer(model_path='./data/bodymodels/smplx/smplx',
                                       gender='neutral',
                                       use_compressed=False,
                                       use_face_contour=True,
+                                      num_betas=16,
                                       num_expression_coeffs=100)
     else:
         raise NotImplementedError
     print(smpl_model)
-    # smpl_data = np.load(data_dir + '/smpl_params.npz')
-    # smpl_data = {k: torch.from_numpy(v.astype(np.float32)) for k, v in smpl_data.items()}
-    if os.path.exists(join(args.data_dir, 'motion.npz')):
-        smpl_data = to_tensor(load_dotdict(join(args.data_dir, 'motion.npz')))
-    if os.path.exists(join(args.data_dir, 'smpl_params_short.pkl')):
-        with open(join(args.data_dir, 'smpl_params_short.pkl'), 'rb') as f:
-            smpl_data = to_tensor(dotdict(pickle.load(f)))
 
     with torch.no_grad():
-        if args.type == 'smplh':
+        if args.body_type == 'smplh':
             cano_pose = torch.zeros(156, dtype=torch.float32)
             cano_pose[5] = math.radians(25)
             cano_pose[8] = math.radians(-25)
@@ -366,18 +359,16 @@ if __name__ == '__main__':
             # cano_smpl_v_min = cano_smpl_v.min()
             # cano_smpl_v_max = cano_smpl_v.max()
             smpl_faces = smpl_model.faces_tensor.numpy().astype(np.int64)
-        elif args.type == 'smplx':
-            import config
+        elif args.body_type == 'smplx':
             from smplx.lbs import batch_rodrigues
-            betas = np.load(join(args.data_dir, 'cano_betas.npy'))
-            betas = torch.from_numpy(betas).float()
-            global_orient = batch_rodrigues(config.cano_smpl_global_orient.reshape(-1, 3))
-            transl = config.cano_smpl_transl
-            body_pose = batch_rodrigues(config.cano_smpl_body_pose.reshape(-1, 3))
-            cano_smpl = smpl_model.forward(betas=betas,
-                                           global_orient=global_orient[None],
-                                           transl=transl[None],
-                                           body_pose=body_pose[None])
+            cano_pose = np.load(join(args.data_dir, 'output-output-smpl-3d', 'mesh-smplx/cano.npz'))
+            betas = torch.from_numpy(cano_pose['betas']).to(torch.float32)
+            body_pose = np.zeros(63, dtype=np.float32)
+            body_pose[2] = math.radians(25)
+            body_pose[5] = math.radians(-25)
+            body_pose = torch.from_numpy(body_pose).to(torch.float32)
+            body_pose = batch_rodrigues(body_pose.view(21, 3)).view(1, -1, 3, 3)
+            cano_smpl = smpl_model.forward(betas=betas, body_pose=body_pose)
             cano_smpl_v = cano_smpl.vertices[0].numpy()
             cano_center = 0.5 * (cano_smpl_v.min(0) + cano_smpl_v.max(0))
             smpl_faces = smpl_model.faces_tensor.numpy().astype(np.int64)
@@ -389,11 +380,25 @@ if __name__ == '__main__':
         template = trimesh.load(join(args.data_dir, 'template.ply'), process = False)
         using_template = True
     else:
-        print(f'# Cannot find template.ply from {args.data_dir}, using {args.type} as template')
+        print(f'# Cannot find template.ply from {args.data_dir}, using {args.body_type} as template')
         template = trimesh.Trimesh(cano_smpl_v, smpl_faces, process = False)
         using_template = False
 
     cano_smpl_v = template.vertices.astype(np.float32)
+    if args.render_flame_mask:
+        smplx_flame = np.load('./data/bodymodels/smplx/smplx/SMPL-X__FLAME_vertex_ids.npy')
+        cano_smpl_flame = np.zeros_like(cano_smpl_v)
+        cano_smpl_flame[smplx_flame] = 1
+    else: 
+        cano_smpl_flame = None
+    if args.render_mano_mask:
+        with open('./data/bodymodels/smplx/smplx/MANO_SMPLX_vertex_ids.pkl', 'rb') as f:
+            smplx_mano = pickle.load(f)
+        cano_smpl_mano = np.zeros_like(cano_smpl_v)
+        cano_smpl_mano[smplx_mano['left_hand']] = 1
+        cano_smpl_mano[smplx_mano['right_hand']] = 1
+    else:
+        cano_smpl_mano = None
     smpl_faces = template.faces.astype(np.int64)
     cano_smpl_v_dup = cano_smpl_v[smpl_faces.reshape(-1)]
     cano_smpl_n_dup = template.vertex_normals.astype(np.float32)[smpl_faces.reshape(-1)]
@@ -408,6 +413,9 @@ if __name__ == '__main__':
     back_mv[:3, :3] = rot_y
     back_mv[:3, 3] = -rot_y @ cano_center + np.array([0, 0, -10], np.float32)
     back_mv[1:3] *= -1
+
+    output_dir = f'{args.output_prefix}_{args.size}'
+    os.makedirs(join(args.data_dir, output_dir), exist_ok=True)
 
     # render canonical smpl position maps
     cano_renderer.set_model(cano_smpl_v_dup, cano_smpl_v_dup)
@@ -431,20 +439,51 @@ if __name__ == '__main__':
     cano_nml_map = np.concatenate([front_cano_nml_map, back_cano_nml_map], 1)
     cv.imwrite(join(args.data_dir, output_dir, 'cano_smpl_nml_map.exr'), cano_nml_map)
 
-    body_mask = np.linalg.norm(cano_pos_map, axis = -1) > 0.
+    # render canonical smpl flame maps
+    if args.render_flame_mask:
+        cano_smpl_flame_dup = cano_smpl_flame[smpl_faces.reshape(-1)]
+        cano_renderer.set_model(cano_smpl_v_dup, cano_smpl_flame_dup)
+        cano_renderer.set_camera(front_mv)
+        front_cano_flame_map = cano_renderer.render()[:, :, :3]
+
+        cano_renderer.set_camera(back_mv)
+        back_cano_flame_map = cano_renderer.render()[:, :, :3]
+        back_cano_flame_map = cv.flip(back_cano_flame_map, 1)
+        cano_flame_map = np.concatenate([front_cano_flame_map, back_cano_flame_map], 1)
+        cv.imwrite(join(args.data_dir, output_dir, 'cano_smpl_flame_mask.exr'), cano_flame_map)
+
+    # render canonical smpl mano maps
+    if args.render_mano_mask:
+        cano_smpl_mano_dup = cano_smpl_mano[smpl_faces.reshape(-1)]
+        cano_renderer.set_model(cano_smpl_v_dup, cano_smpl_mano_dup)
+        cano_renderer.set_camera(front_mv)
+        front_cano_mano_map = cano_renderer.render()[:, :, :3]
+
+        cano_renderer.set_camera(back_mv)
+        back_cano_mano_map = cano_renderer.render()[:, :, :3]
+        back_cano_mano_map = cv.flip(back_cano_mano_map, 1)
+        cano_mano_map = np.concatenate([front_cano_mano_map, back_cano_mano_map], 1)
+        cv.imwrite(join(args.data_dir, output_dir, 'cano_smpl_mano_mask.exr'), cano_mano_map)
+
+    body_mask = np.linalg.norm(cano_pos_map, axis=-1) > 0.
     cano_pts = cano_pos_map[body_mask]
     if using_template:
         weight_volume = CanoBlendWeightVolume(join(args.data_dir, 'cano_weight_volume.npz'))
-        pts_lbs = weight_volume.forward_weight(torch.from_numpy(cano_pts)[None].cuda())[0]
+        pts_lbs = weight_volume.forward_weight(torch.from_numpy(cano_pts)[None])[0]
     else:
-        if args.type == 'smplh':
+        if args.body_type == 'smplh':
             pts_lbs = interpolate_lbs(cano_pts, cano_smpl_v, smpl_faces, smpl_model.weights)
-        elif args.type == 'smplx':
+        elif args.body_type == 'smplx':
             pts_lbs = interpolate_lbs(cano_pts, cano_smpl_v, smpl_faces, smpl_model.lbs_weights)
-        pts_lbs = torch.from_numpy(pts_lbs).cuda()
-    np.save(join(args.data_dir, output_dir, 'init_pts_lbs.npy'), pts_lbs.cpu().numpy())
+        else:
+            raise NotImplementedError
+    np.save(join(args.data_dir, output_dir, 'init_pts_lbs.npy'), pts_lbs)
+    pts_lbs = torch.from_numpy(pts_lbs)
+    
+    if args.skip_pos_map:
+        exit('Skip positional map generation.')
 
-    if args.type == 'smplh':
+    if args.body_type == 'smplh':
         smpl_model = smpl_model.cuda()
         params = to_cuda(params)
         smpl_data = to_cuda(smpl_data)
@@ -485,34 +524,45 @@ if __name__ == '__main__':
             pcd = trimesh.PointCloud(live_pos_map.reshape(-1, 3)).export(join(args.data_dir, output_dir, '%06d.ply' % pose_idx))
             cv.imwrite(join(args.data_dir, output_dir, '%06d.exr' % pose_idx), live_pos_map)
     
-    elif args.type == 'smplx':
-        inv_cano_smpl_A = torch.linalg.inv(cano_smpl.A).cuda()
-        body_mask = torch.from_numpy(body_mask).cuda()
-        cano_pts = torch.from_numpy(cano_pts).cuda()
-        pts_lbs = pts_lbs.cuda()
+    elif args.body_type == 'smplx':
+        inv_cano_smpl_A = torch.linalg.inv(cano_smpl.A)
+        body_mask = torch.from_numpy(body_mask)
+        cano_pts = torch.from_numpy(cano_pts)
+        # pts_lbs = pts_lbs.cuda()
 
-        for k, v in tqdm(smpl_data.items()):
+        def write_live_pos_map(pose, size, output_dir):
+            frame = os.path.basename(pose).split('.')[0]
+            pose = np.load(pose)
+            v = {
+                'betas': torch.from_numpy(pose['betas']),
+                'body_pose': torch.from_numpy(pose['body_pose']),
+                'left_hand_pose': torch.from_numpy(pose['left_hand_pose']),
+                'right_hand_pose': torch.from_numpy(pose['right_hand_pose']),
+                'jaw_pose': torch.from_numpy(pose['jaw_pose']),
+                'expression': torch.from_numpy(pose['expression']),
+            }
             with torch.no_grad():
                 live_smpl_woRoot = smpl_model.forward(
-                    betas=betas,
-                    gloabl_orient=global_orient[None],
-                    transl=transl[None],
+                    betas=v['betas'],
                     body_pose=v['body_pose'],
-                    jaw_pose=v['jaw_pose'],
-                    expression=v['expression'],
                     left_hand_pose=v['left_hand_pose'],
                     right_hand_pose=v['right_hand_pose'],
+                    jaw_pose=v['jaw_pose'],
+                    expression=v['expression'],
                 )
 
-            cano2live_jnt_mats_woRoot = torch.matmul(live_smpl_woRoot.A.cuda(), inv_cano_smpl_A)[0]
+            cano2live_jnt_mats_woRoot = torch.matmul(live_smpl_woRoot.A, inv_cano_smpl_A)[0]
             pt_mats = torch.einsum('nj,jxy->nxy', pts_lbs, cano2live_jnt_mats_woRoot)
             live_pts = torch.einsum('nxy,ny->nx', pt_mats[..., :3, :3], cano_pts) + pt_mats[..., :3, 3]
-            live_pos_map = torch.zeros((args.size, 2 * args.size, 3)).to(live_pts)
+            live_pos_map = torch.zeros((size, 2 * size, 3)).to(live_pts)
             live_pos_map[body_mask] = live_pts
             live_pos_map = F.interpolate(live_pos_map.permute(2, 0, 1)[None], None, [0.5, 0.5], mode = 'nearest')[0]
-            live_pos_map = live_pos_map.permute(1, 2, 0).cpu().numpy()
-            pcd = trimesh.PointCloud(live_pos_map.reshape(-1, 3)).export(join(args.data_dir, output_dir, f'{k}.ply'))
-            cv.imwrite(join(args.data_dir, output_dir, f'{k}.exr'), live_pos_map)
+            live_pos_map = live_pos_map.permute(1, 2, 0).numpy()
+            # pcd = trimesh.PointCloud(live_pos_map.reshape(-1, 3)).export(join(output_dir, f'{name}.ply'))
+            cv.imwrite(join(output_dir, f'{frame}.exr'), live_pos_map)
+        
+        poses = sorted(glob.glob(join(args.data_dir, 'output-output-smpl-3d/smplxfull/*.npz')))
+        parallel_execution(poses, size=args.size, output_dir=join(args.data_dir, output_dir), action=write_live_pos_map, print_progress=True)
 
     else:
         raise NotImplementedError

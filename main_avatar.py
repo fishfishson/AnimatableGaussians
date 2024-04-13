@@ -13,6 +13,7 @@ import cv2 as cv
 import glob
 import datetime
 import trimesh
+import pickle
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import importlib
@@ -278,10 +279,10 @@ class AvatarTrainer:
         pretrain_eval_interval = self.opt['train']['pretrain_eval_interval']
         batch_num = len(self.dataset) // batch_size
         dataloader = torch.utils.data.DataLoader(self.dataset,
-                                                 batch_size = batch_size,
-                                                 shuffle = True,
-                                                 num_workers = num_workers,
-                                                 drop_last = True)
+                                                 batch_size=batch_size,
+                                                 shuffle=True,
+                                                 num_workers=num_workers,
+                                                 drop_last=True)
 
         # tb writer
         log_dir = self.opt['train']['net_ckpt_dir'] + '/' + datetime.datetime.now().strftime('pretrain_%Y_%m_%d_%H_%M_%S')
@@ -547,27 +548,27 @@ class AvatarTrainer:
         training_dataset = MvRgbDataset(**self.opt['train']['data'], training = False)
         if self.opt['test'].get('n_pca', -1) >= 1:
             training_dataset.compute_pca(n_components = self.opt['test']['n_pca'])
-        if 'pose_data' in self.opt['test']:
-            testing_dataset = PoseDataset(**self.opt['test']['pose_data'], smpl_shape = training_dataset.smpl_data['betas'][0])
-            dataset_name = testing_dataset.dataset_name
-            seq_name = testing_dataset.seq_name
-        else:
-            testing_dataset = MvRgbDataset(**self.opt['test']['data'], training = False)
-            dataset_name = 'training'
-            seq_name = ''
+        # if 'pose_data' in self.opt['test']:
+        #     testing_dataset = PoseDataset(**self.opt['test']['pose_data'], smpl_shape = training_dataset.smpl_data['betas'][0])
+        #     dataset_name = testing_dataset.dataset_name
+        #     seq_name = testing_dataset.seq_name
+        # else:
+        testing_dataset = MvRgbDataset(**self.opt['test']['data'], training = False)
+        # dataset_name = 'training'
+        # seq_name = ''
 
         self.dataset = testing_dataset
         iter_idx = self.load_ckpt(self.opt['test']['prev_ckpt'], False)[1]
 
-        output_dir = self.opt['test'].get('output_dir', None)
-        if output_dir is None:
-            view_setting = config.opt['test'].get('view_setting', 'free')
-            if view_setting == 'camera':
-                view_folder = 'cam_%03d' % config.opt['test']['render_view_idx']
-            else:
-                view_folder = view_setting + '_view'
-            exp_name = os.path.basename(os.path.dirname(self.opt['test']['prev_ckpt']))
-            output_dir = f'./test_results/{training_dataset.subject_name}/{exp_name}/{dataset_name}_{seq_name}_{view_folder}' + '/batch_%06d' % iter_idx
+        # output_dir = self.opt['test'].get('output_dir', None)
+        # if output_dir is None:
+        #     view_setting = config.opt['test'].get('view_setting', 'free')
+        #     if view_setting == 'camera':
+        #         view_folder = 'cam_%03d' % config.opt['test']['render_view_idx']
+        #     else:
+        #         view_folder = view_setting + '_view'
+        exp_name = os.path.basename(os.path.dirname(self.opt['test']['prev_ckpt']))
+        output_dir = f'./test_results/{testing_dataset.subject_name}/{exp_name}/batch_{iter_idx:06d}'
 
         use_pca = self.opt['test'].get('n_pca', -1) >= 1
         if use_pca:
@@ -579,12 +580,13 @@ class AvatarTrainer:
         os.makedirs(output_dir + '/live_skeleton', exist_ok = True)
         os.makedirs(output_dir + '/rgb_map', exist_ok = True)
         os.makedirs(output_dir + '/mask_map', exist_ok = True)
+        os.makedirs(output_dir + '/cano_flame', exist_ok = True)
 
-        geo_renderer = None
-        item_0 = self.dataset.getitem(0, training = False)
-        object_center = item_0['live_bounds'].mean(0)
-        global_orient = item_0['global_orient'].cpu().numpy() if isinstance(item_0['global_orient'], torch.Tensor) else item_0['global_orient']
-        global_orient = cv.Rodrigues(global_orient)[0]
+        # geo_renderer = None
+        # item_0 = self.dataset.getitem(0, training = False)
+        # object_center = item_0['live_bounds'].mean(0)
+        # global_orient = item_0['global_orient'].cpu().numpy() if isinstance(item_0['global_orient'], torch.Tensor) else item_0['global_orient']
+        # global_orient = cv.Rodrigues(global_orient)[0]
         # print('object_center: ', object_center.tolist())
         # print('global_orient: ', global_orient.tolist())
         # # exit(1)
@@ -603,106 +605,107 @@ class AvatarTrainer:
                 time_start.record()
                 time_start_all.record()
 
-            img_scale = self.opt['test'].get('img_scale', 1.0)
-            view_setting = config.opt['test'].get('view_setting', 'free')
-            if view_setting == 'camera':
-                # training view setting
-                cam_id = config.opt['test']['render_view_idx']
-                intr = self.dataset.intr_mats[cam_id].copy()
-                intr[:2] *= img_scale
-                extr = self.dataset.extr_mats[cam_id].copy()
-                img_h, img_w = int(self.dataset.img_heights[cam_id] * img_scale), int(self.dataset.img_widths[cam_id] * img_scale)
-            elif view_setting.startswith('free'):
-                # free view setting
-                # frame_num_per_circle = 360
-                frame_num_per_circle = 216
-                rot_Y = (idx % frame_num_per_circle) / float(frame_num_per_circle) * 2 * np.pi
+            # img_scale = self.opt['test'].get('img_scale', 1.0)
+            # view_setting = config.opt['test'].get('view_setting', 'free')
+            # if view_setting == 'camera':
+            # training view setting
+            # cam_id = config.opt['test']['render_view_idx']
+            # intr = self.dataset.intr_mats[cam_id].copy()
+            # intr[:2] *= img_scale
+            # extr = self.dataset.extr_mats[cam_id].copy()
+            # img_h, img_w = int(self.dataset.img_heights[cam_id] * img_scale), int(self.dataset.img_widths[cam_id] * img_scale)
+            # elif view_setting.startswith('free'):
+            #     # free view setting
+            #     # frame_num_per_circle = 360
+            #     frame_num_per_circle = 216
+            #     rot_Y = (idx % frame_num_per_circle) / float(frame_num_per_circle) * 2 * np.pi
 
-                extr = visualize_util.calc_free_mv(object_center,
-                                                   tar_pos = np.array([0, 0, 2.5]),
-                                                   rot_Y = rot_Y,
-                                                   rot_X = 0.3 if view_setting.endswith('bird') else 0.,
-                                                   global_orient = global_orient if self.opt['test'].get('global_orient', False) else None)
-                intr = np.array([[1100, 0, 512], [0, 1100, 512], [0, 0, 1]], np.float32)
-                intr[:2] *= img_scale
-                img_h = int(1024 * img_scale)
-                img_w = int(1024 * img_scale)
-            elif view_setting.startswith('front'):
-                # front view setting
-                extr = visualize_util.calc_free_mv(object_center,
-                                                   tar_pos = np.array([0, 0, 2.5]),
-                                                   rot_Y = 0.,
-                                                   rot_X = 0.3 if view_setting.endswith('bird') else 0.,
-                                                   global_orient = global_orient if self.opt['test'].get('global_orient', False) else None)
-                intr = np.array([[1100, 0, 512], [0, 1100, 512], [0, 0, 1]], np.float32)
-                intr[:2] *= img_scale
-                img_h = int(1024 * img_scale)
-                img_w = int(1024 * img_scale)
-            elif view_setting.startswith('back'):
-                # back view setting
-                extr = visualize_util.calc_free_mv(object_center,
-                                                   tar_pos = np.array([0, 0, 2.5]),
-                                                   rot_Y = np.pi,
-                                                   rot_X = 0.5 * np.pi / 4. if view_setting.endswith('bird') else 0.,
-                                                   global_orient = global_orient if self.opt['test'].get('global_orient', False) else None)
-                intr = np.array([[1100, 0, 512], [0, 1100, 512], [0, 0, 1]], np.float32)
-                intr[:2] *= img_scale
-                img_h = int(1024 * img_scale)
-                img_w = int(1024 * img_scale)
-            elif view_setting.startswith('moving'):
-                # moving camera setting
-                extr = visualize_util.calc_free_mv(object_center,
-                                                   # tar_pos = np.array([0, 0, 3.0]),
-                                                   # rot_Y = -0.3,
-                                                   tar_pos = np.array([0, 0, 2.5]),
-                                                   rot_Y = 0.,
-                                                   rot_X = 0.3 if view_setting.endswith('bird') else 0.,
-                                                   global_orient = global_orient if self.opt['test'].get('global_orient', False) else None)
-                intr = np.array([[1100, 0, 512], [0, 1100, 512], [0, 0, 1]], np.float32)
-                intr[:2] *= img_scale
-                img_h = int(1024 * img_scale)
-                img_w = int(1024 * img_scale)
-            elif view_setting.startswith('cano'):
-                cano_center = self.dataset.cano_bounds.mean(0)
-                extr = np.identity(4, np.float32)
-                extr[:3, 3] = -cano_center
-                rot_x = np.identity(4, np.float32)
-                rot_x[:3, :3] = cv.Rodrigues(np.array([np.pi, 0, 0], np.float32))[0]
-                extr = rot_x @ extr
-                f_len = 5000
-                extr[2, 3] += f_len / 512
-                intr = np.array([[f_len, 0, 512], [0, f_len, 512], [0, 0, 1]], np.float32)
-                # item = self.dataset.getitem(idx,
-                #                             training = False,
-                #                             extr = extr,
-                #                             intr = intr,
-                #                             img_w = 1024,
-                #                             img_h = 1024)
-                img_w, img_h = 1024, 1024
-                # item['live_smpl_v'] = item['cano_smpl_v']
-                # item['cano2live_jnt_mats'] = torch.eye(4, dtype = torch.float32)[None].expand(item['cano2live_jnt_mats'].shape[0], -1, -1)
-                # item['live_bounds'] = item['cano_bounds']
-            else:
-                raise ValueError('Invalid view setting for animation!')
-
+            #     extr = visualize_util.calc_free_mv(object_center,
+            #                                        tar_pos = np.array([0, 0, 2.5]),
+            #                                        rot_Y = rot_Y,
+            #                                        rot_X = 0.3 if view_setting.endswith('bird') else 0.,
+            #                                        global_orient = global_orient if self.opt['test'].get('global_orient', False) else None)
+            #     intr = np.array([[1100, 0, 512], [0, 1100, 512], [0, 0, 1]], np.float32)
+            #     intr[:2] *= img_scale
+            #     img_h = int(1024 * img_scale)
+            #     img_w = int(1024 * img_scale)
+            # elif view_setting.startswith('front'):
+            #     # front view setting
+            #     extr = visualize_util.calc_free_mv(object_center,
+            #                                        tar_pos = np.array([0, 0, 2.5]),
+            #                                        rot_Y = 0.,
+            #                                        rot_X = 0.3 if view_setting.endswith('bird') else 0.,
+            #                                        global_orient = global_orient if self.opt['test'].get('global_orient', False) else None)
+            #     intr = np.array([[1100, 0, 512], [0, 1100, 512], [0, 0, 1]], np.float32)
+            #     intr[:2] *= img_scale
+            #     img_h = int(1024 * img_scale)
+            #     img_w = int(1024 * img_scale)
+            # elif view_setting.startswith('back'):
+            #     # back view setting
+            #     extr = visualize_util.calc_free_mv(object_center,
+            #                                        tar_pos = np.array([0, 0, 2.5]),
+            #                                        rot_Y = np.pi,
+            #                                        rot_X = 0.5 * np.pi / 4. if view_setting.endswith('bird') else 0.,
+            #                                        global_orient = global_orient if self.opt['test'].get('global_orient', False) else None)
+            #     intr = np.array([[1100, 0, 512], [0, 1100, 512], [0, 0, 1]], np.float32)
+            #     intr[:2] *= img_scale
+            #     img_h = int(1024 * img_scale)
+            #     img_w = int(1024 * img_scale)
+            # elif view_setting.startswith('moving'):
+            #     # moving camera setting
+            #     extr = visualize_util.calc_free_mv(object_center,
+            #                                        # tar_pos = np.array([0, 0, 3.0]),
+            #                                        # rot_Y = -0.3,
+            #                                        tar_pos = np.array([0, 0, 2.5]),
+            #                                        rot_Y = 0.,
+            #                                        rot_X = 0.3 if view_setting.endswith('bird') else 0.,
+            #                                        global_orient = global_orient if self.opt['test'].get('global_orient', False) else None)
+            #     intr = np.array([[1100, 0, 512], [0, 1100, 512], [0, 0, 1]], np.float32)
+            #     intr[:2] *= img_scale
+            #     img_h = int(1024 * img_scale)
+            #     img_w = int(1024 * img_scale)
+            # elif view_setting.startswith('cano'):
+            #     cano_center = self.dataset.cano_bounds.mean(0)
+            #     extr = np.identity(4, np.float32)
+            #     extr[:3, 3] = -cano_center
+            #     rot_x = np.identity(4, np.float32)
+            #     rot_x[:3, :3] = cv.Rodrigues(np.array([np.pi, 0, 0], np.float32))[0]
+            #     extr = rot_x @ extr
+            #     f_len = 5000
+            #     extr[2, 3] += f_len / 512
+            #     intr = np.array([[f_len, 0, 512], [0, f_len, 512], [0, 0, 1]], np.float32)
+            #     # item = self.dataset.getitem(idx,
+            #     #                             training = False,
+            #     #                             extr = extr,
+            #     #                             intr = intr,
+            #     #                             img_w = 1024,
+            #     #                             img_h = 1024)
+            #     img_w, img_h = 1024, 1024
+            #     # item['live_smpl_v'] = item['cano_smpl_v']
+            #     # item['cano2live_jnt_mats'] = torch.eye(4, dtype = torch.float32)[None].expand(item['cano2live_jnt_mats'].shape[0], -1, -1)
+            #     # item['live_bounds'] = item['cano_bounds']
+            # else:
+            #     raise ValueError('Invalid view setting for animation!')
             getitem_func = self.dataset.getitem_fast if hasattr(self.dataset, 'getitem_fast') else self.dataset.getitem
             item = getitem_func(
                 idx,
                 training = False,
-                extr = extr,
-                intr = intr,
-                img_w = img_w,
-                img_h = img_h
+                zero_all = True,
+                # extr = extr,
+                # intr = intr,
+                # img_w = img_w,
+                # img_h = img_h,
             )
+            pose_idx, view_idx = item['data_idx']
             items = to_cuda(item, add_batch = False)
 
-            if view_setting.startswith('moving') or view_setting == 'free_moving':
-                current_center = items['live_bounds'].cpu().numpy().mean(0)
-                delta = current_center - object_center
+            # if view_setting.startswith('moving') or view_setting == 'free_moving':
+            #     current_center = items['live_bounds'].cpu().numpy().mean(0)
+            #     delta = current_center - object_center
 
-                object_center[0] += delta[0]
-                # object_center[1] += delta[1]
-                # object_center[2] += delta[2]
+            #     object_center[0] += delta[0]
+            #     # object_center[1] += delta[1]
+            #     # object_center[2] += delta[2]
 
             if log_time:
                 time_end.record()
@@ -710,19 +713,19 @@ class AvatarTrainer:
                 print('Loading data costs %.4f secs' % (time_start.elapsed_time(time_end) / 1000.))
                 time_start.record()
 
-            if self.opt['test'].get('render_skeleton', False):
-                from utils.visualize_skeletons import construct_skeletons
-                skel_vertices, skel_faces = construct_skeletons(item['joints'].cpu().numpy(), item['kin_parent'].cpu().numpy())
-                skel_mesh = trimesh.Trimesh(skel_vertices, skel_faces, process = False)
+            # if self.opt['test'].get('render_skeleton', False):
+            #     from utils.visualize_skeletons import construct_skeletons
+            #     skel_vertices, skel_faces = construct_skeletons(item['joints'].cpu().numpy(), item['kin_parent'].cpu().numpy())
+            #     skel_mesh = trimesh.Trimesh(skel_vertices, skel_faces, process = False)
 
-                if geo_renderer is None:
-                    geo_renderer = Renderer(item['img_w'], item['img_h'], shader_name = 'phong_geometry', bg_color = (1, 1, 1))
-                extr, intr = item['extr'], item['intr']
-                geo_renderer.set_camera(extr, intr)
-                geo_renderer.set_model(skel_vertices[skel_faces.reshape(-1)], skel_mesh.vertex_normals.astype(np.float32)[skel_faces.reshape(-1)])
-                skel_img = geo_renderer.render()[:, :, :3]
-                skel_img = (skel_img * 255).astype(np.uint8)
-                cv.imwrite(output_dir + '/live_skeleton/%08d.jpg' % item['data_idx'], skel_img)
+            #     if geo_renderer is None:
+            #         geo_renderer = Renderer(item['img_w'], item['img_h'], shader_name = 'phong_geometry', bg_color = (1, 1, 1))
+            #     extr, intr = item['extr'], item['intr']
+            #     geo_renderer.set_camera(extr, intr)
+            #     geo_renderer.set_model(skel_vertices[skel_faces.reshape(-1)], skel_mesh.vertex_normals.astype(np.float32)[skel_faces.reshape(-1)])
+            #     skel_img = geo_renderer.render()[:, :, :3]
+            #     skel_img = (skel_img * 255).astype(np.uint8)
+            #     cv.imwrite(output_dir + '/live_skeleton/%08d.jpg' % item['data_idx'], skel_img)
 
             if log_time:
                 time_end.record()
@@ -731,6 +734,7 @@ class AvatarTrainer:
                 time_start.record()
 
             if 'smpl_pos_map' not in items:
+                print('calculate pose map...')
                 self.avatar_net.get_pose_map(items)
 
             # pca
@@ -752,7 +756,11 @@ class AvatarTrainer:
                 print('Rendering pose conditions costs %.4f secs' % (time_start.elapsed_time(time_end) / 1000.))
                 time_start.record()
 
-            output = self.avatar_net.render(items, bg_color = self.bg_color, use_pca = use_pca)
+            if self.avatar_net.replace_flame:
+                flame_gs = self.infer_flame_model(items)
+            else:
+                flame_gs = None
+            output = self.avatar_net.render(items, bg_color = self.bg_color, use_pca = use_pca, flame_gs = flame_gs)
             if log_time:
                 time_end.record()
                 torch.cuda.synchronize()
@@ -762,24 +770,26 @@ class AvatarTrainer:
             rgb_map = output['rgb_map']
             rgb_map.clip_(0., 1.)
             rgb_map = (rgb_map * 255).to(torch.uint8).cpu().numpy()
-            cv.imwrite(output_dir + '/rgb_map/%08d.jpg' % item['data_idx'], rgb_map)
+            cv.imwrite(output_dir + f'/rgb_map/{pose_idx:06d}_{view_idx:02d}.jpg', rgb_map)
 
-            if 'mask_map' in output:
-                os.makedirs(output_dir + '/mask_map', exist_ok = True)
-                mask_map = output['mask_map'][:, :, 0]
-                mask_map.clip_(0., 1.)
-                mask_map = (mask_map * 255).to(torch.uint8)
-                cv.imwrite(output_dir + '/mask_map/%08d.png' % item['data_idx'], mask_map.cpu().numpy())
+            _ = trimesh.PointCloud(output['posed_gaussians']['positions'].cpu().numpy()).export(output_dir + f'/cano_flame/{pose_idx:06d}_{view_idx:02d}.ply')
 
-            if self.opt['test'].get('save_tex_map', False):
-                os.makedirs(output_dir + '/cano_tex_map', exist_ok = True)
-                cano_tex_map = output['cano_tex_map']
-                cano_tex_map.clip_(0., 1.)
-                cano_tex_map = (cano_tex_map * 255).to(torch.uint8)
-                cv.imwrite(output_dir + '/cano_tex_map/%08d.jpg' % item['data_idx'], cano_tex_map.cpu().numpy())
+            # if 'mask_map' in output:
+            #     os.makedirs(output_dir + '/mask_map', exist_ok = True)
+            #     mask_map = output['mask_map'][:, :, 0]
+            #     mask_map.clip_(0., 1.)
+            #     mask_map = (mask_map * 255).to(torch.uint8)
+            #     cv.imwrite(output_dir + '/mask_map/%08d.png' % item['data_idx'], mask_map.cpu().numpy())
 
-            if self.opt['test'].get('save_ply', False):
-                save_gaussians_as_ply(output_dir + '/posed_gaussians/%08d.ply' % item['data_idx'], output['posed_gaussians'])
+            # if self.opt['test'].get('save_tex_map', False):
+            #     os.makedirs(output_dir + '/cano_tex_map', exist_ok = True)
+            #     cano_tex_map = output['cano_tex_map']
+            #     cano_tex_map.clip_(0., 1.)
+            #     cano_tex_map = (cano_tex_map * 255).to(torch.uint8)
+            #     cv.imwrite(output_dir + '/cano_tex_map/%08d.jpg' % item['data_idx'], cano_tex_map.cpu().numpy())
+
+            # if self.opt['test'].get('save_ply', False):
+            #     save_gaussians_as_ply(output_dir + '/posed_gaussians/%08d.ply' % item['data_idx'], output['posed_gaussians'])
 
             if log_time:
                 time_end.record()

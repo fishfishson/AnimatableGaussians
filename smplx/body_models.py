@@ -1475,11 +1475,13 @@ class SMPLXLayer(SMPLX):
 
         if transl is not None:
             joints += transl.unsqueeze(dim=1)
+            landmarks += transl.unsqueeze(dim=1)
             vertices += transl.unsqueeze(dim=1)
             A[:, :, :3, 3] += transl.unsqueeze(dim=1)
 
         output = SMPLXOutput(vertices=vertices if return_verts else None,
                              joints=joints,
+                             landmarks=landmarks,
                              betas=betas,
                              expression=expression,
                              global_orient=global_orient,

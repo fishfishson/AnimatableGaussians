@@ -1,0 +1,49 @@
+train:
+  dataset:
+    data_dir: ./data/30min_data_0
+    frame_range: [0, 15000, 1]
+    camera_range: [1, null, 1]
+    images_dir: 'images'
+    masks_dir: 'masks'
+    pos_map_dir: 'smpl_pos_map_1024'
+    smplx_dir: 'output-output-smpl-3d/smplxfull'
+  dataloader:
+    batch_size: 1
+    num_workers: 8
+
+val:
+  dataset:
+    data_dir: ./data/30min_data_0
+    frame_range: [15000, 17000, 100]
+    camera_range: [0, 1, 1]
+    images_dir: 'images'
+    masks_dir: 'masks'
+    pos_map_dir: 'smpl_pos_map_1024'
+    smplx_dir: 'output-output-smpl-3d/smplxfull'
+  dataloader:
+    batch_size: 1
+    num_workers: 8
+
+model:
+  smpl_pos_map_dir: ./data/30min_data_0/smpl_pos_map_1024
+  cano_smplx_path: ./data/30min_data_0/output-output-smpl-3d/mesh-smplx/cano.npz
+  use_flame_mask: True
+  use_mano_mask: False
+  lr: 0.0005
+  # bodymodel:
+  #   model_path: ./data/bodymodels/smplx/smplx
+  #   gender: neutral
+  #   use_compressed: False
+  #   use_face_contour: True
+  #   num_betas: 16
+  #   num_expression_coeffs: 100
+
+trainer:
+  log_dir: ./results/30min_data_0_flame
+  save_dir: ./results/30min_data_0_flame/pretrain
+  every_n_train_steps: 1000
+  devices: 1
+  max_steps: 5000
+  num_sanity_val_steps: 0
+  log_every_n_steps: 10
+  val_check_interval: 1000

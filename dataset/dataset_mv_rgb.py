@@ -23,6 +23,33 @@ import utils.visualize_util as visualize_util
 import dataset.commons as commons
 
 
+def look_at(eye, center, up):
+    # Create new axes
+    # z-axis: from center to eye
+    f = center - eye
+    f = f / np.linalg.norm(f)
+
+    # x-axis: up cross z-axis
+    s = np.cross(up, f)
+    s = s / np.linalg.norm(s)
+
+    # y-axis: z-axis cross x-axis
+    u = np.cross(f, s)
+    u = u / np.linalg.norm(u)
+
+    # Create rotation matrix including new axes
+    R = np.vstack([-s, -u, f])
+
+    # Ensure R is a valid rotation matrix
+    U, _, Vt = np.linalg.svd(R)
+    R = U @ Vt
+
+    # Translation vector
+    t = -R @ eye
+
+    return R, t
+
+
 class MvRgbDatasetCustom(Dataset):
     @torch.no_grad()
     def __init__(
@@ -406,8 +433,13 @@ class MvRgbDatasetCustomSMPLX(Dataset):
         if self.subject_name is None:
             self.subject_name = os.path.basename(self.data_dir)
         self.load_smpl_pos_map = load_smpl_pos_map
-        self.smpl_pos_map_size = smpl_pos_map_size
         self.load_smpl_nml_map = load_smpl_nml_map
+        if smpl_pos_map_size == 1024:
+            self.smpl_pos_map_dir = 'smpl_pos_map'
+            self.smpl_nml_map_dir = 'smpl_nml_map'
+        else:
+            self.smpl_pos_map_dir = f'smpl_pos_map_{smpl_pos_map_size}'
+            self.smpl_nml_map_dir = f'smpl_nml_map_{smpl_pos_map_size}'
         self.mode = mode  # '3dgs' or 'nerf'
         self.H = H
         self.W = W
@@ -497,7 +529,7 @@ class MvRgbDatasetCustomSMPLX(Dataset):
     def __getitem__(self, index):
         return self.getitem(index, self.training)
     
-    def getitem(self, index, training = True, **kwargs):
+    def getitem(self, index, training = True, zero_all = False, **kwargs):
         if training or kwargs.get('eval', False):  # training or evaluation
             pose_idx, view_idx = self.data_list[index]
             pose_idx = kwargs['pose_idx'] if 'pose_idx' in kwargs else pose_idx
@@ -506,12 +538,28 @@ class MvRgbDatasetCustomSMPLX(Dataset):
             if not training:
                 print('data index: (%d, %d)' % (pose_idx, view_idx))
         else:  # testing
-            pose_idx = self.pose_list[index]
-            data_idx = pose_idx
-            print('data index: %d' % pose_idx)
+            pose_idx, view_idx = self.data_list[index]
+            pose_idx = kwargs['pose_idx'] if 'pose_idx' in kwargs else pose_idx
+            view_idx = kwargs['view_idx'] if 'view_idx' in kwargs else view_idx
+            data_idx = (pose_idx, view_idx)
+            print('data index: (%d, %d)' % (pose_idx, view_idx))
+            # pose_idx = self.pose_list[index]
+            # data_idx = pose_idx
+            # print('data index: %d' % pose_idx)
 
         # SMPL
         smpl_data = self.smpl_data[f'{pose_idx:06d}']
+        # smpl_data = self.smpl_data[f'{pose_idx:06d}']
+        # for k in smpl_data.keys():
+        #     if 'pose' in k:
+        #         data = torch.zeros_like(smpl_data[k])
+        #         data[..., 0, 0] = 1.0
+        #         data[..., 1, 1] = 1.0
+        #         data[..., 2, 2] = 1.0
+        #     else:
+        #         smpl_data[k] = torch.zeros_like(smpl_data[k])
+        # smpl_data['global_orient'] = self.cano_smpl_global_orient
+        # smpl_data['transl'] = self.cano_smpl_transl
         with torch.no_grad():
             live_smpl = self.smpl_model.forward(
                 betas=self.cano_smpl_betas,
@@ -547,27 +595,26 @@ class MvRgbDatasetCustomSMPLX(Dataset):
             )
 
         data_item = dict()
-        if self.load_smpl_pos_map:
-            if self.smpl_pos_map_size == 1024:
-                smpl_pos_map = cv.imread(self.data_dir + '/smpl_pos_map/%06d.exr' % pose_idx, cv.IMREAD_UNCHANGED)
-            else:
-                smpl_pos_map = cv.imread(self.data_dir + '/smpl_pos_map_%d/%06d.exr' % (self.smpl_pos_map_size, pose_idx), cv.IMREAD_UNCHANGED)
+        if self.load_smpl_pos_map and not zero_all:
+            smpl_pos_map = cv.imread(self.data_dir + f'/{self.smpl_pos_map_dir}/{pose_idx:06d}.exr', cv.IMREAD_UNCHANGED)
             pos_map_size = smpl_pos_map.shape[1] // 2
             smpl_pos_map = np.concatenate([smpl_pos_map[:, :pos_map_size], smpl_pos_map[:, pos_map_size:]], 2)
             smpl_pos_map = smpl_pos_map.transpose((2, 0, 1))
             data_item['smpl_pos_map'] = smpl_pos_map
 
-        if self.load_smpl_nml_map:
-            if self.smpl_pos_map_size == 1024:
-                smpl_nml_map = cv.imread(self.data_dir + '/smpl_nml_map/%06d.jpg' % pose_idx, cv.IMREAD_UNCHANGED)
-            else:
-                smpl_nml_map = cv.imread(self.data_dir + '/smpl_nml_map_%d/%06d.jpg' % (self.smpl_pos_map_size, pose_idx), cv.IMREAD_UNCHANGED)
+        if self.load_smpl_nml_map and not zero_all:
+            smpl_nml_map = cv.imread(self.data_dir + f'/{self.smpl_pos_map_dir}/{pose_idx:06d}.jpg', cv.IMREAD_UNCHANGED)
             smpl_nml_map = (smpl_nml_map / 255.).astype(np.float32)
             nml_map_size = smpl_nml_map.shape[1] // 2
             smpl_nml_map = np.concatenate([smpl_nml_map[:, :nml_map_size], smpl_nml_map[:, nml_map_size:]], 2)
             smpl_nml_map = smpl_nml_map.transpose((2, 0, 1))
             data_item['smpl_nml_map'] = smpl_nml_map
 
+        data_item['shape'] = self.cano_smpl_betas
+        data_item['expr'] = smpl_data['expression']
+        data_item['leye_pose'] = smpl_data['leye_pose']
+        data_item['reye_pose'] = smpl_data['reye_pose']
+        data_item['jaw_pose'] = smpl_data['jaw_pose']
         # data_item['joints'] = live_smpl.joints[0, :22]
         # data_item['kin_parent'] = self.smpl_model.parents[:22].to(torch.long)
         data_item['item_idx'] = index
@@ -580,7 +627,7 @@ class MvRgbDatasetCustomSMPLX(Dataset):
         data_item['cano_smpl_v'] = cano_smpl.vertices[0]
         # data_item['cano_jnts'] = cano_smpl.joints[0]
         data_item['cano2live_jnt_mats'] = torch.matmul(live_smpl.A[0], torch.linalg.inv(cano_smpl.A[0]))
-        # data_item['cano2live_jnt_mats_woRoot'] = torch.matmul(live_smpl_woRoot.A[0], torch.linalg.inv(cano_smpl.A[0]))
+        data_item['cano2live_jnt_mats_woRoot'] = torch.matmul(live_smpl_woRoot.A[0], torch.linalg.inv(cano_smpl.A[0]))
         data_item['cano_smpl_center'] = self.cano_smpl_center
         data_item['cano_bounds'] = self.cano_bounds
         data_item['smpl_faces'] = self.smpl_faces
@@ -589,23 +636,58 @@ class MvRgbDatasetCustomSMPLX(Dataset):
         live_bounds = torch.stack([min_xyz, max_xyz], 0).to(torch.float32).numpy()
         data_item['live_bounds'] = live_bounds
 
-        color_img, mask_img = self.load_color_mask_images(pose_idx, view_idx)
-
-        color_img = (color_img / 255.).astype(np.float32)
-
-        boundary_mask_img, mask_img = self.get_boundary_mask(mask_img)
-
-        if self.mode == '3dgs':
+        if training or kwargs.get('eval', False):
+            color_img, mask_img = self.load_color_mask_images(pose_idx, view_idx)
+            color_img = (color_img / 255.).astype(np.float32)
+            assert color_img.shape[0] == self.H
+            assert color_img.shape[1] == self.W
+            boundary_mask_img, mask_img = self.get_boundary_mask(mask_img)
             data_item.update({
-                'img_h': color_img.shape[0],
-                'img_w': color_img.shape[1],
-                'extr': self.extr_mats[view_idx],
-                'intr': self.intr_mats[view_idx],
+                # 'img_h': color_img.shape[0],
+                # 'img_w': color_img.shape[1],
                 'color_img': color_img,
                 'mask_img': mask_img,
                 'boundary_mask_img': boundary_mask_img
             })
+
+        if self.mode == '3dgs':
+            if not zero_all:
+                extr = self.extr_mats[view_idx]
+                intr = self.intr_mats[view_idx]
+            else:
+                eye = np.array([-1.5, 0.0, 1.2])
+                center = np.array([0.34, 0.52, 1.00])
+                up = np.array([0, 0, 1])
+                R, t = look_at(eye, center, up)
+                extr = np.eye(4, dtype=np.float32)
+                extr[:3, :3] = R
+                extr[:3, 3] = t
+                scale = 2.0
+                fx = max(self.W, self.H) * 0.8
+                fy = max(self.W, self.H) * 0.8
+                cx = self.W / 2
+                cy = self.H / 2
+                intr = np.array([
+                    [fx, 0, cx],
+                    [0, fy, cy],
+                    [0, 0, 1]
+                ], np.float32)
+                intr[:2, :] *= scale
+                H = int(self.H * scale)
+                W = int(self.W * scale)
+            data_item.update({
+                'extr': extr,
+                'intr': intr,
+                'img_h': H,
+                'img_w': W,
+                # 'color_img': color_img,
+                # 'mask_img': mask_img,
+                # 'boundary_mask_img': boundary_mask_img
+            })
+            camera_center = np.linalg.inv(self.extr_mats[view_idx])[:3, 3]
+            data_item['camera_center'] = camera_center.reshape(1, 3)
         elif self.mode == 'nerf':
+            raise ValueError('Invalid dataset mode!')
             depth_img = np.zeros(color_img.shape[:2], np.float32)
             nerf_random = nerf_util.sample_randomly_for_nerf_rendering(
                 color_img, mask_img, depth_img,
@@ -658,11 +740,11 @@ class MvRgbDatasetCustomSMPLX(Dataset):
         from tqdm import tqdm
         import joblib
 
-        if not os.path.exists(self.data_dir + '/smpl_pos_map/pca_%d.ckpt' % n_components):
+        if not os.path.exists(self.data_dir + f'/{self.smpl_pos_map_dir}/pca_{n_components}.ckpt'):
             pose_conds = []
             mask = None
             for pose_idx in tqdm(self.pose_list, desc = 'Loading position maps...'):
-                pose_map = cv.imread(self.data_dir + '/smpl_pos_map/%06d.exr' % pose_idx, cv.IMREAD_UNCHANGED)
+                pose_map = cv.imread(self.data_dir + f'/{self.smpl_pos_map_dir}/{pose_idx:06d}.exr', cv.IMREAD_UNCHANGED)
                 pose_map = pose_map[:, :pose_map.shape[1] // 2]
                 if mask is None:
                     mask = np.linalg.norm(pose_map, axis = -1) > 1e-6
@@ -671,11 +753,11 @@ class MvRgbDatasetCustomSMPLX(Dataset):
             pose_conds = pose_conds.reshape(pose_conds.shape[0], -1)
             self.pca = PCA(n_components = n_components)
             self.pca.fit(pose_conds)
-            joblib.dump(self.pca, self.data_dir + '/smpl_pos_map/pca_%d.ckpt' % n_components)
+            joblib.dump(self.pca, self.data_dir + f'/{self.smpl_pos_map_dir}/pca_{n_components}.ckpt')
             self.pos_map_mask = mask
         else:
-            self.pca = joblib.load(self.data_dir + '/smpl_pos_map/pca_%d.ckpt' % n_components)
-            pose_map = cv.imread(sorted(glob.glob(self.data_dir + '/smpl_pos_map/0*.exr'))[0], cv.IMREAD_UNCHANGED)
+            self.pca = joblib.load(self.data_dir + f'/{self.smpl_pos_map_dir}/pca_{n_components}.ckpt')
+            pose_map = cv.imread(sorted(glob.glob(self.data_dir + f'/{self.smpl_pos_map_dir}/0*.exr'))[0], cv.IMREAD_UNCHANGED)
             pose_map = pose_map[:, :pose_map.shape[1] // 2]
             self.pos_map_mask = np.linalg.norm(pose_map, axis = -1) > 1e-6
 
